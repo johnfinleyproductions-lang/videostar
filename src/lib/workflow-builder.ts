@@ -14,6 +14,7 @@ const GEMMA_PATH =
 export function buildTextToVideoWorkflow(req: GenerateRequest) {
   const frames = durationToFrames(req.duration, req.fps);
   const seed = req.seed ?? Math.floor(Math.random() * 2147483647);
+  const fpsInt = Math.round(req.fps);
 
   return {
     prompt: {
@@ -71,7 +72,7 @@ export function buildTextToVideoWorkflow(req: GenerateRequest) {
       "15": {
         class_type: "VHS_VideoCombine",
         inputs: {
-          frame_rate: ["23", 0],
+          frame_rate: req.fps,
           loop_count: 0,
           filename_prefix: "FrameForge",
           format: "video/h264-mp4",
@@ -119,26 +120,18 @@ export function buildTextToVideoWorkflow(req: GenerateRequest) {
       "22": {
         class_type: "LTXVConditioning",
         inputs: {
-          frame_rate: ["23", 0],
+          frame_rate: req.fps,
           positive: ["3", 0],
           negative: ["4", 0],
         },
       },
-      "23": {
-        class_type: "FloatConstant",
-        inputs: { value: req.fps },
-      },
       "26": {
         class_type: "LTXVEmptyLatentAudio",
         inputs: {
-          frames_number: ["27", 0],
-          frame_rate: ["42", 0],
+          frames_number: frames,
+          frame_rate: fpsInt,
           batch_size: 1,
         },
-      },
-      "27": {
-        class_type: "INTConstant",
-        inputs: { value: frames },
       },
       "28": {
         class_type: "LTXVConcatAVLatent",
@@ -162,16 +155,12 @@ export function buildTextToVideoWorkflow(req: GenerateRequest) {
           latent_image: ["28", 0],
         },
       },
-      "42": {
-        class_type: "CM_FloatToInt",
-        inputs: { a: ["23", 0] },
-      },
       "43": {
         class_type: "EmptyLTXVLatentVideo",
         inputs: {
           width: req.width,
           height: req.height,
-          length: ["27", 0],
+          length: frames,
           batch_size: 1,
         },
       },
@@ -202,6 +191,7 @@ export function buildImageToVideoWorkflow(
   };
 
   // Add LTXVImgToVideo conditioning node
+  const frames = durationToFrames(req.duration, req.fps);
   (workflow as Record<string, unknown>)["51"] = {
     class_type: "LTXVImgToVideoLatent",
     inputs: {
@@ -209,8 +199,7 @@ export function buildImageToVideoWorkflow(
       vae: ["1", 2],
       width: req.width,
       height: req.height,
-      length: (workflow as Record<string, Record<string, unknown>>)["27"]
-        .inputs as Record<string, unknown>,
+      length: frames,
       batch_size: 1,
     },
   };
