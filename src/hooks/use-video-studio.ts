@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useRef, useEffect } from "react";
 import { v4 as uuidv4 } from "uuid";
+import { toast } from "sonner";
 import { LTX_VIDEO_MODEL } from "@/lib/models";
 import type {
   VideoGenerationItem,
@@ -133,9 +134,19 @@ export function useVideoStudio() {
 
   // Generate
   const generate = useCallback(async () => {
-    if (!prompt.trim() || activeCount >= MAX_CONCURRENT) return;
+    console.log("[FrameForge] Generate clicked", { prompt: prompt.trim(), activeCount, MAX_CONCURRENT });
+
+    if (!prompt.trim()) {
+      toast.error("Enter a prompt first");
+      return;
+    }
+    if (activeCount >= MAX_CONCURRENT) {
+      toast.error("A generation is already in progress");
+      return;
+    }
 
     setIsGenerating(true);
+    toast.info("Queuing generation...");
 
     try {
       // Upload source image if present
@@ -203,6 +214,8 @@ export function useVideoStudio() {
       startPolling(data.id);
     } catch (error) {
       console.error("Generate error:", error);
+      const message = error instanceof Error ? error.message : "Generation failed";
+      toast.error(message);
       setIsGenerating(false);
     }
   }, [
