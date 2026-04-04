@@ -53,8 +53,8 @@ if torch.cuda.is_available():
     print(f'  VRAM: {torch.cuda.get_device_properties(0).total_mem / 1024**3:.1f} GB')
     print(f'  Compute capability: {torch.cuda.get_device_capability(0)}')
 else:
-    echo '  WARNING: CUDA not available! Check PyTorch install.'
-    echo '  Try: pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu130'
+    print('  WARNING: CUDA not available! Check PyTorch install.')
+    print('  Try: pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu130')
 "
 
 # ------------------------------------------------------------
