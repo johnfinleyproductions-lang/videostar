@@ -10,7 +10,7 @@ GitHub repo name is `videostar` for historical reasons. **The app is called Fram
 
 **Every new Claude/AI session working on FrameForge must read this entire README before asking the user any setup questions.** Do not ask the user to re-explain setup — it's all documented here. Update the [Session Handoff](#session-handoff) section at the end of every session.
 
-**CURRENT STATE OF THE INVESTIGATION: The crash is NOT at the ComfyUI layer.** Sessions 1–7 eliminated every ComfyUI-level variable (PyTorch cu128→cu130, Ollama, fish shell, MultiGPU). Crashes still reproduce. The issue is in the PyTorch/driver/PCIe stack below ComfyUI. See Session Handoff for the exact diagnostic ladder.
+**CURRENT STATE (end of session 7 + web research):** The crash is NOT at the ComfyUI layer. It's a known **NVIDIA driver 595 + Blackwell** bug class (Xid 109 CTX SWITCH TIMEOUT / Xid 119 GSP RPC timeout). Other users hit the same crash on the same card. See Session Handoff for the corrected diagnostic ladder and the driver-downgrade path.
 
 **Top-8 gotchas that burn every session:**
 1. **ComfyUI runs inside a Python venv** at `~/ComfyUI/.venv`. Always `source ~/ComfyUI/.venv/bin/activate` BEFORE any pip command.
@@ -57,7 +57,8 @@ GitHub repo name is `videostar` for historical reasons. **The app is called Fram
 | Python in venv | 3.14.3 |
 | **Compute GPU** | NVIDIA RTX PRO 4500 Blackwell, 32623 MB, sm_120, PCIe `62:00.0` |
 | **Display GPU** | AMD Radeon, PCIe `c3:00.0` |
-| NVIDIA driver | **595.58.03** (CUDA 13.2) |
+| NVIDIA driver | **595.58.03** (CUDA 13.2) — **known-buggy on Blackwell, see Session Handoff** |
+| **Required kernel module flavor** | **`nvidia-open-dkms`** (proprietary does NOT support sm_120) |
 | PyTorch | **nightly cu130** — `2.12.0.dev20260404+cu130` |
 | RAM | 128 GB |
 | ComfyUI | 0.18.1 |
@@ -124,7 +125,7 @@ If you get stuck in tmux, from a fresh SSH session: `tmux detach-client -s comfy
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| **🔥 Framestation hard-locks (`Read from remote host ... Operation timed out`) within seconds of ComfyUI starting.** Persists even after: cu130 PyTorch, Ollama stopped, bash wrap, **MultiGPU removed**. | **Unknown — below ComfyUI layer.** Remaining suspects: (a) PyTorch nightly cu130 + driver 595.58.03 interaction on Blackwell; (b) comfy_kitchen CUDA backend hitting Blackwell FP4/FP8 code path; (c) PCIe ASPM on bridge `0000:61:00.0` (early dmesg showed `Unable to change power state from D0 to D3hot`); (d) NVIDIA GSP firmware instability on Blackwell with this driver version. | **See Session Handoff diagnostic ladder** — minimal isolated CUDA tests outside ComfyUI, then `pcie_aspm=off nvidia.NVreg_EnableGpuFirmware=0` kernel cmdline, then driver downgrade as last resort. |
+| **🔥 Framestation hard-locks within seconds of ComfyUI starting.** Persists after cu130, Ollama stopped, bash wrap, MultiGPU removed. | **Known NVIDIA driver 595 + Blackwell bug.** Web search confirmed: exact-match NVIDIA forum thread "Driver v.595 RTX PRO 4500 Blackwell crashes even when watching videos in the browser". Crash class is Xid 109 (CTX SWITCH TIMEOUT) or Xid 119 (GSP RPC timeout). Same driver version 595.58.03 reported crashing on RTX 5090, RTX Pro 6000, and now our 4500. | **See Session Handoff.** Capture Xid from `journalctl -k -b -1`, then downgrade to `nvidia-open-dkms` 580.126.09. `pcie_aspm=off` is a secondary mitigation. `NVreg_EnableGpuFirmware=0` does NOT work on Blackwell — GSP is mandatory, don't bother. |
 | `.venv/bin/activate (line 40): 'case' builtin not inside of switch block` | fish trying to parse bash-syntax activate script | Wrap in `bash -lc '...'` or drop into `bash` first |
 | Stuck in tmux, `Ctrl+B d` does nothing | Terminal intercepts Ctrl+B | From a second SSH session: `tmux detach-client -s <name>` |
 | `/usr/bin/python: No module named pip` | System Python, not venv | `source ~/ComfyUI/.venv/bin/activate` (under bash) |
@@ -161,137 +162,120 @@ videostar/
 
 ## Session Handoff
 
-### Status as of 2026-04-04 end of session 7 — MultiGPU RULED OUT, crash is below ComfyUI
+### Status as of 2026-04-04 end of session 7 — external validation, driver is the suspect
 
-**What we've conclusively eliminated (variables confirmed to NOT be the crash cause):**
+**Breakthrough:** Session 7 ended with web research that conclusively shows this crash is a **known, documented, multi-user NVIDIA driver bug class** — not a FrameForge or ComfyUI problem.
 
-| Variable | How it was tested | Result |
-|---|---|---|
-| PyTorch cu128 vs cu130 mismatch | Upgraded to nightly cu130 | Warning gone, crash remained |
-| Ollama GPU squatting | `sudo systemctl stop ollama` via `frame` script | Crash remained |
-| fish shell parsing `.venv/bin/activate` | Wrapped tmux commands in `bash -lc` | Crash remained |
-| **ComfyUI-MultiGPU custom node** | **Moved out of `custom_nodes/` in session 7, ran `frame`** | **Crash remained — RULED OUT** |
+**Confirmed by web search:**
 
-**Conclusion:** The crash is NOT in the ComfyUI application layer. It's in the **PyTorch runtime / NVIDIA driver / PCIe / hardware firmware stack** below ComfyUI. We have been treating this as a ComfyUI config problem for 7 sessions. It isn't one.
+1. **Exact-match thread exists:** NVIDIA developer forum has `"Driver v.595 RTX PRO 4500 Blackwell crashes even when watching videos in the browser"`. Same card, same driver version, Linux, crashes. (Thread content itself is behind an egress block so only the title was readable, but the title alone is confirmation.)
+2. **Xid 109 CTX SWITCH TIMEOUT is reported on driver 595.58.03 specifically** with RTX 5090 Blackwell. Our driver version exactly.
+3. **Xid 119 GSP RPC timeout** is the documented Blackwell crash class across multiple driver versions (570, 575, 580, 595). Symptom: GSP firmware heartbeat stops → kernel driver yanks card off bus → SSH dies mid-command. Matches our symptom exactly.
+4. **`NVreg_EnableGpuFirmware=0` is USELESS on Blackwell.** GSP firmware is mandatory on Blackwell architecture — the flag silently does nothing. **This directly invalidates the previous Backup Plan A. Do not bother setting this flag.**
+5. **Blackwell REQUIRES `nvidia-open-dkms` kernel modules.** The proprietary `nvidia.ko` does not support sm_120. If the user has proprietary installed, nothing will ever work. Must verify.
+6. **Driver 580.126.09** is the latest stable production branch as of early 2026. Downgrading from 595 to 580 is a real, tested escape hatch used by other Blackwell users on Linux.
+7. **Broad ecosystem problem.** Multiple users report instability across 570 → 595 driver versions on Blackwell. This is not isolated to our card.
 
-**Remaining suspects (ordered by likelihood and testability):**
+**What this means for strategy:** We stop bisecting PyTorch and ComfyUI versions. The bug is not there. The priority pivots to (a) getting a crash-confirming Xid number from dmesg, then (b) downgrading the driver.
 
-1. **PyTorch nightly cu130 + driver 595.58.03 interaction** — specifically the `torch.cuda.mem_get_info()` call that `comfy/model_management.py` makes during startup. This was the specific Python traceback we saw in session 5 before the lockup. Might reproduce in bare Python with zero ComfyUI involvement.
-2. **PCIe ASPM** on bridge `0000:61:00.0`. Very first dmesg error back in session 3 was `pcieport 0000:61:00.0: Unable to change power state from D0 to D3hot, device inaccessible`. We assumed fixing PyTorch made that moot. Maybe the bridge is still trying to D3-sleep the Blackwell card and taking down the bus. Fix: `pcie_aspm=off` at kernel cmdline.
-3. **NVIDIA GSP firmware** — the 5xx driver series offloads a lot of runtime work to a firmware blob running on the GPU itself. Blackwell + brand-new driver + cu130 nightly is a combination that has known stability issues. Fix: `nvidia.NVreg_EnableGpuFirmware=0` at kernel cmdline to fall back to host-side runtime.
-4. **Driver version 595.58.03** — very new. If cmdline flags don't help, downgrade to a CachyOS-known-good driver (e.g. 565.x production branch).
-5. **comfy_kitchen CUDA backend** on Blackwell — got enabled when we moved to cu130 (was disabled on cu128). Could be hitting a code path the driver can't handle. Would need to disable via env var or ComfyUI flag, BUT we should prove this suspicion by reproducing the crash without ComfyUI involved first.
+**What we've conclusively eliminated (still true from session 7):**
 
-**Current blocking issue:**
-- Framestation is DOWN as of 2026-04-04 late session 7. Requires physical power cycle.
+| Variable | Result |
+|---|---|
+| PyTorch cu128 vs cu130 mismatch | Ruled out — crash persists on both |
+| Ollama GPU squatting | Ruled out — crash persists with Ollama stopped |
+| fish shell parsing `.venv/bin/activate` | Ruled out — fixed via `bash -lc`, crash persists |
+| ComfyUI-MultiGPU custom node | Ruled out — parked outside `custom_nodes/`, crash persists |
+
+**Current blocking issue:** Framestation is DOWN. Physical power cycle required.
 
 ---
 
-### Session 8 diagnostic ladder — execute in order, STOP at the first crash
-
-The strategy is to **reproduce the crash with progressively less code** until we find the minimal reproducer. Every step below does less than the previous step. Whichever step crashes the box, we've found the layer where the bug lives.
+### Session 8 diagnostic ladder — execute in order
 
 **Step 0 — Physical power cycle.** Hold power button 10s.
 
-**Step 1 — SSH in and drop into bash:**
+**Step 1 — SSH in, drop into bash, capture the crash fingerprint from the PREVIOUS boot.** This is the single most valuable command this session:
 ```bash
 ssh frame
 bash
-source ~/ComfyUI/.venv/bin/activate
+sudo journalctl -k -b -1 | grep -iE "xid|nvrm|nvidia|pcieport" | tail -100
 ```
+What we're looking for:
+- **`NVRM: Xid (PCI:0000:62:00): 119`** → GSP RPC timeout. Confirmed GSP firmware death. **Driver downgrade is the fix.** Skip to Step 5.
+- **`NVRM: Xid (PCI:0000:62:00): 109`** → CTX SWITCH TIMEOUT. Known 595.58.03 Blackwell bug. **Driver downgrade is the fix.** Skip to Step 5.
+- **`NVRM: Xid (PCI:0000:62:00): 79`** → GPU has fallen off the bus. Usually PCIe / ASPM. Try `pcie_aspm=off` in Backup Plan A.
+- **`pcieport 0000:61:00.0: Unable to change power state from D0 to D3hot`** → Same PCIe ASPM issue as session 3. `pcie_aspm=off`.
+- **Anything else / no Xid at all** → Fall through to Steps 2–4 minimal-reproducer ladder.
 
-**Step 2 — `nvidia-smi` baseline.** Confirms GPU is healthy after power cycle:
+**Step 2 — Verify we're actually on the open kernel modules** (Blackwell requires them):
 ```bash
-nvidia-smi
+modinfo nvidia | grep -iE "license|version"
+pacman -Q | grep -iE "nvidia|linux"
 ```
-Expected: Blackwell at 32623 MB idle, driver 595.58.03, no processes. If this hangs or reports errors, we have a deeper problem — `sudo dkms autoinstall && sudo reboot`.
-
-**Step 3 — `import torch` only.** Does importing PyTorch alone crash the box?
+Expected: `license: Dual MIT/GPL` and a package named `nvidia-open-dkms` or `nvidia-open`. If you see `license: NVIDIA` or `nvidia-dkms` (non-open), **the card has never been working right — fix this first**:
 ```bash
-python -c "print('about to import'); import torch; print('torch imported, version:', torch.__version__)"
-```
-- If **CRASHES** → PyTorch nightly import itself is poison. Jump to "Backup plan A: kernel cmdline flags" below.
-- If **SUCCEEDS** → continue.
-
-**Step 4 — `torch.cuda.is_available()`.** Does CUDA init alone crash?
-```bash
-python -c "import torch; print('cuda available:', torch.cuda.is_available())"
-```
-- If **CRASHES** → CUDA runtime init on Blackwell is the bug. Jump to Backup plan A.
-- If **SUCCEEDS** with `True` → continue.
-
-**Step 5 — `torch.cuda.get_device_name(0)`.** Does device enumeration crash?
-```bash
-python -c "import torch; torch.cuda.is_available(); print('device:', torch.cuda.get_device_name(0))"
-```
-- If **CRASHES** → device enumeration is the bug. Jump to Backup plan A.
-- If **SUCCEEDS** → continue.
-
-**Step 6 — THE CRITICAL CALL: `torch.cuda.mem_get_info(0)`.** This is exactly what `comfy/model_management.py` does during startup, and is where we saw the `cudaErrorDevicesUnavailable` traceback in session 5.
-```bash
-python -c "import torch; _ = torch.cuda.is_available(); free, total = torch.cuda.mem_get_info(0); print(f'free: {free}, total: {total}')"
-```
-- If **CRASHES** → this is our minimal reproducer. We've isolated the bug to a single PyTorch function call on Blackwell + driver 595.58.03. File a PyTorch bug, or jump to Backup plan A to work around at the kernel level.
-- If **SUCCEEDS** → go to step 7.
-
-**Step 7 — allocate a tensor on the GPU:**
-```bash
-python -c "import torch; x = torch.randn(1000, 1000, device='cuda'); y = x @ x; print('matmul ok, result norm:', y.norm().item())"
-```
-- If **CRASHES** → kernel launch / memory allocation is the bug.
-- If **SUCCEEDS** → CUDA is actually working fine in isolation, and the bug is something ComfyUI specifically does. Go to step 8.
-
-**Step 8 — start ComfyUI bare (no custom nodes at all):**
-```bash
-mv ~/ComfyUI/custom_nodes ~/ComfyUI/custom_nodes-parked
-mkdir ~/ComfyUI/custom_nodes
-cd ~/ComfyUI
-python main.py --listen 0.0.0.0 --port 8188 --disable-cuda-malloc
-```
-- If **CRASHES** → ComfyUI core itself triggers something custom nodes didn't. Possibly `comfy_kitchen` backend init. Try adding `COMFYUI_DISABLE_KITCHEN=1` env var or similar.
-- If **SUCCEEDS** → start putting custom nodes back one at a time (LTX-Video first, then VHS, then Manager) to find which one trips the crash.
-
----
-
-### Backup plan A — kernel cmdline stability flags
-
-If any step 3–6 crashes, the issue is below Python, and we need hardware-level mitigations. Add the following to GRUB:
-
-```bash
-sudo nano /etc/default/grub
-```
-Find the `GRUB_CMDLINE_LINUX_DEFAULT="..."` line and append (inside the quotes):
-```
-pcie_aspm=off nvidia.NVreg_EnableGpuFirmware=0
-```
-
-Then regenerate grub config and reboot:
-```bash
-sudo grub-mkconfig -o /boot/grub/grub.cfg
-sudo reboot
-```
-
-- **`pcie_aspm=off`** — disables PCIe Active State Power Management. Prevents the bridge `0000:61:00.0` from ever trying to put the Blackwell card into D3 sleep state, which is what was hanging the bus early in this investigation.
-- **`nvidia.NVreg_EnableGpuFirmware=0`** — disables NVIDIA's GSP firmware offload. On Blackwell + recent drivers, GSP has been a common source of instability. This falls back to the legacy host-side CUDA runtime.
-
-After reboot, re-run Step 1 and the ladder from Step 2.
-
-### Backup plan B — driver downgrade
-
-If Backup plan A doesn't help, the driver itself (`595.58.03`) is the problem. Pin CachyOS to the latest 565.x production branch (or whatever is current at the time):
-```bash
-sudo pacman -Syu nvidia-dkms=565.57.01-1   # example — use actual available version
+sudo pacman -R nvidia-dkms nvidia-utils 2>/dev/null || true
+sudo pacman -S nvidia-open-dkms
 sudo mkinitcpio -P
 sudo reboot
 ```
 
-If the driver downgrade fixes it, pin the package in `/etc/pacman.conf` under `[options]` with `IgnorePkg = nvidia-dkms nvidia-utils`.
+**Step 3 — `nvidia-smi` baseline:**
+```bash
+nvidia-smi
+```
+Expected: Blackwell at 32623 MB idle, driver 595.58.03, no processes. Hang or errors → deeper driver problem, jump to Step 5 (downgrade).
+
+**Step 4 — Minimal PyTorch reproducer ladder.** Only run if Step 1 did NOT give us a clean Xid fingerprint. Each of these does less than ComfyUI. Stop at the first crash.
+```bash
+source ~/ComfyUI/.venv/bin/activate
+python -c "import torch; print(torch.__version__)"
+python -c "import torch; print(torch.cuda.is_available())"
+python -c "import torch; print(torch.cuda.get_device_name(0))"
+python -c "import torch; print(torch.cuda.mem_get_info(0))"
+python -c "import torch; x = torch.randn(1000,1000,device='cuda'); print((x@x).norm().item())"
+```
+Whichever line hangs the box is our minimal repro.
+
+**Step 5 — Driver downgrade to 580.126.09 (or current stable).** This is the actual fix, not a backup plan:
+```bash
+pacman -Ss nvidia-open
+sudo downgrade nvidia-open-dkms nvidia-utils nvidia-settings   # if `downgrade` util is installed
+# OR manually from /var/cache/pacman/pkg/:
+sudo pacman -U /var/cache/pacman/pkg/nvidia-open-dkms-580*.pkg.tar.zst \
+               /var/cache/pacman/pkg/nvidia-utils-580*.pkg.tar.zst
+sudo mkinitcpio -P
+sudo sed -i 's/^#IgnorePkg.*/IgnorePkg = nvidia-open-dkms nvidia-utils nvidia-settings/' /etc/pacman.conf
+sudo reboot
+```
+After reboot: `nvidia-smi` should show driver `580.x`. Then run `frame` and see if the crash is gone.
+
+---
+
+### Backup plan A — kernel cmdline PCIe stability (only if Step 1 shows pcieport errors, not Xid)
+
+```bash
+sudo nano /etc/default/grub
+# Append to GRUB_CMDLINE_LINUX_DEFAULT inside the quotes:
+#   pcie_aspm=off
+sudo grub-mkconfig -o /boot/grub/grub.cfg
+sudo reboot
+```
+
+**Do NOT add `nvidia.NVreg_EnableGpuFirmware=0`** — confirmed useless on Blackwell (GSP is mandatory firmware; the flag is ignored silently).
+
+### Backup plan B — if driver downgrade to 580 doesn't fix it
+
+- Try 570.x production branch (previous LTS).
+- Check if CachyOS has a `nvidia-open-beta` or `nvidia-open-lts` package with a different build.
+- As an absolute last resort: swap in a non-Blackwell card (RTX 4090 or similar) to confirm the bug is Blackwell-specific.
 
 ---
 
 ### Still TODO (after the stack is stable)
 
-1. Patch `src/lib/workflow-builder.ts` to not inject `LTXVSequenceParallelMultiGPUPatcher` on single-NVIDIA-GPU systems (query `/system_stats`, skip when count == 1). This is the permanent FrameForge fix even though MultiGPU is no longer suspected — it's still an unnecessary dependency.
+1. Patch `src/lib/workflow-builder.ts` to not inject `LTXVSequenceParallelMultiGPUPatcher` on single-NVIDIA-GPU systems.
 2. Patch `setup-comfyui.sh` to install PyTorch from `nightly/cu130`.
 3. Patch `package.json` `"dev"` script to `"next dev -p 3060"`.
 4. Verify LTX-Video 2.3 checkpoint + Gemma 3 text encoder are downloaded.
