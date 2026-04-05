@@ -6,11 +6,26 @@ GitHub repo name is `videostar` for historical reasons. **The app is called Fram
 
 ---
 
+## What FrameForge is (plain English)
+
+FrameForge is a **local AI video generator**. You type a prompt like "shiba inu licking an ice cream cone," hit generate, and a few minutes later you get an MP4 back. No cloud fees, no sending prompts to anyone's servers, runs entirely on hardware you own.
+
+Two halves talking over your LAN:
+
+- **Frontend (Mac browser):** A Next.js/React web app at `http://192.168.4.176:3060` where you type prompts, pick settings, and download finished videos. This is what lives in the `videostar` repo.
+- **Backend (Framestation Linux box):** ComfyUI running LTX-Video 2.3 + Gemma 3 12B text encoder on an NVIDIA RTX PRO 4500 Blackwell (32 GB VRAM). This is the muscle that actually generates the frames.
+
+Flow: Browser → FrameForge UI builds a ComfyUI workflow → POSTs it to ComfyUI → model runs on the Blackwell → video comes back → download. The `frame` command (`/usr/local/bin/frame`, canonical source at `scripts/frame`) is a one-word startup that kills Ollama, starts ComfyUI in tmux, starts Next.js in tmux, and tells you where to point your browser.
+
+Why it matters: runway.ml is $35–95/mo, Sora costs tokens, both keep your prompts. FrameForge is free forever, fully private, as fast as the card can run.
+
+---
+
 ## ⚠️ AI ASSISTANT: READ THIS FILE FIRST
 
 **Every new Claude/AI session working on FrameForge must read this entire README before asking the user any setup questions.** Do not ask the user to re-explain setup — it's all documented here. Update the [Session Handoff](#session-handoff) section at the end of every session.
 
-**CURRENT STATE (end of session 8):** **The root cause is a PCIe link failure at boot**, not a CUDA/driver runtime bug. `dmesg` from a crashed boot shows the Blackwell's PCIe slot reporting `Link Down` and `Card not present` during NVRM driver load, with `RmInitAdapter failed! (0x22:0x56:894)` and `pcieport 0000:61:00.0: Unable to change power state from D0 to D3hot`. This happens BEFORE any CUDA code runs — every "ComfyUI crash" so far was actually the first ioctl into an already-half-dead card. Session 8 mitigation is adding `pcie_aspm=off pcie_port_pm=off` to the kernel cmdline via systemd-boot. If that fails, force PCIe Gen 4 in BIOS. See Session Handoff.
+**CURRENT STATE (end of session 8 part 2):** Root cause localized to **PCIe / NVRM init layer**, BIOS settings are the next move. Kernel cmdline flags `pcie_aspm=off pcie_port_pm=off` are LIVE and confirmed to have eliminated the PCIe hotplug churn (no more `Link Down` / `Card not present` / `D0→D3hot` at boot). But `NVRM: RmInitAdapter failed! (0x22:0x56:894)` still fires — meaning the ASPM power-cycling was a symptom, not the root cause. The real issue is BAR mapping / link training at the BIOS level. Session 9 = BIOS settings (Above 4G Decoding, Resizable BAR, force Gen 4).
 
 **Top-9 gotchas that burn every session:**
 1. **ComfyUI runs inside a Python venv** at `~/ComfyUI/.venv`. Always `source ~/ComfyUI/.venv/bin/activate` BEFORE any pip command.
@@ -21,7 +36,7 @@ GitHub repo name is `videostar` for historical reasons. **The app is called Fram
 6. **🔥 PyTorch CUDA version MUST match the NVIDIA driver CUDA version.** Currently `nightly/cu130` (driver CUDA 13.2).
 7. **🔥 Ollama is a GPU squatter.** `sudo systemctl stop ollama` BEFORE starting ComfyUI. `frame` script handles this.
 8. **🔥🔥 Default login shell is FISH, not bash.** `.venv/bin/activate` is bash-syntax. Any command that sources a venv must be wrapped in `bash -lc '...'`. See `scripts/frame`.
-9. **🔥🔥🔥 Bootloader is systemd-boot, NOT GRUB.** `/etc/default/grub` is empty. Kernel cmdline lives in `/boot/loader/entries/linux-cachyos.conf` on the `options` line. Backup before editing: `sudo cp /boot/loader/entries/linux-cachyos.conf /boot/loader/entries/linux-cachyos.conf.bak`.
+9. **🔥🔥🔥 Bootloader is systemd-boot, NOT GRUB.** `/etc/default/grub` is empty. Kernel cmdline lives in `/boot/loader/entries/linux-cachyos.conf` on the `options` line. Backup before editing.
 
 ---
 
@@ -45,8 +60,10 @@ GitHub repo name is `videostar` for historical reasons. **The app is called Fram
 | Hostname | `framerbox395` (Framestation) |
 | OS | CachyOS (Arch-based) |
 | **User default shell** | **fish** (NOT bash) |
-| **Bootloader** | **systemd-boot 260.1** (NOT grub — `/etc/default/grub` is empty) |
+| **Bootloader** | **systemd-boot 260.1** |
 | **Boot entries** | `/boot/loader/entries/linux-cachyos.conf` (default), `linux-cachyos-lts.conf` |
+| **UEFI firmware** | INSYDE Corp. 0.772 (access with `F2` during POST) |
+| **Kernel cmdline** (current) | `... rw rootflags=subvol=/@ zswap.enabled=0 nowatchdog quiet splash pcie_aspm=off pcie_port_pm=off` |
 | LAN IP | `192.168.4.176` |
 | SSH user | `lynf` |
 | SSH from Mac | `ssh frame` |
@@ -54,14 +71,14 @@ GitHub repo name is `videostar` for historical reasons. **The app is called Fram
 | ComfyUI path | `/home/lynf/ComfyUI` |
 | ComfyUI venv | `/home/lynf/ComfyUI/.venv` (bash-only) |
 | tmux sessions | `comfy`, `frame` |
-| Startup shortcut | `/usr/local/bin/frame` (canonical: `scripts/frame` in this repo) |
+| Startup shortcut | `/usr/local/bin/frame` (canonical: `scripts/frame`) |
 | Firewall | `ufw` |
 | Ports | 8188 (ComfyUI), 3060 (Next.js) |
 | Python in venv | 3.14.3 |
 | **Compute GPU** | NVIDIA RTX PRO 4500 Blackwell, 32623 MB, sm_120, PCIe `62:00.0` (parent bridge `61:00.0`, root port `00:01.2`) |
 | **Display GPU** | AMD Radeon, PCIe `c3:00.0` |
 | NVIDIA driver | **595.58.03** (CUDA 13.2) |
-| **NVIDIA kernel module** | **`nvidia-open`** — confirmed loaded as `NVIDIA UNIX Open Kernel Module for x86_64 595.58.03` (required for Blackwell sm_120) |
+| **NVIDIA kernel module** | **`nvidia-open`** — confirmed loaded as `NVIDIA UNIX Open Kernel Module for x86_64 595.58.03` |
 | PyTorch | **nightly cu130** — `2.12.0.dev20260404+cu130` |
 | RAM | 128 GB |
 | ComfyUI | 0.18.1 |
@@ -100,12 +117,12 @@ GitHub repo name is `videostar` for historical reasons. **The app is called Fram
    git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git && cd ComfyUI-LTXVideo && pip install -r requirements.txt && cd ..
    git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git && cd ComfyUI-VideoHelperSuite && pip install -r requirements.txt && cd ..
    git clone https://github.com/ltdrdata/ComfyUI-Manager.git
-   # Do NOT install ComfyUI-MultiGPU — ruled out as crash cause. workflow-builder.ts still injects its node; patch workflow-builder.ts instead.
    ```
 5. **Models:** `huggingface-cli download Lightricks/LTX-Video` to `checkpoints/`, `Kijai/LTX2.3_comfy` to `clip/`
 6. **Clean home dir:** `rm -f /home/lynf/package.json /home/lynf/package-lock.json && rm -rf /home/lynf/node_modules`
 7. **Install `frame` shortcut:** `cd ~/videostar && git pull && sudo install -m 755 scripts/frame /usr/local/bin/frame`
-8. **Apply PCIe stability flags to kernel cmdline** (see Session Handoff — systemd-boot, not grub).
+8. **Kernel cmdline flags:** see Session Handoff.
+9. **BIOS:** Above 4G Decoding ON, Resizable BAR ON, PCIe slot link speed Gen 4 (not Auto/Gen 5).
 
 ---
 
@@ -116,146 +133,96 @@ ssh frame        # from Mac
 frame            # on Framestation
 ```
 
-Watch logs safely (without attaching — avoids the Ctrl+B stuck-in-tmux trap):
+Watch logs safely (without attaching):
 ```bash
 tmux capture-pane -t comfy -p | tail -80
 ```
 
-If you get stuck in tmux, from a fresh SSH session: `tmux detach-client -s comfy`
-
----
-
-## Known issues & solutions
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| **🔥 Framestation hard-locks within seconds of ComfyUI starting.** Every "ComfyUI crash" we've seen. | **PCIe link failure at boot.** `dmesg -k -b -1` shows `pciehp: Slot(0-1): Link Down` + `Card not present` during NVRM load, followed by `RmInitAdapter failed! (0x22:0x56:894)` and `pcieport 0000:61:00.0: Unable to change power state from D0 to D3hot`. The card silently fails to attach at boot; the first CUDA ioctl into the half-dead driver wedges the kernel. | **Session 8 fix: add `pcie_aspm=off pcie_port_pm=off` to `options` line of `/boot/loader/entries/linux-cachyos.conf`, reboot.** If that doesn't help: BIOS → force PCIe slot to Gen 4 (or Gen 3). If that doesn't help: reseat card + power cables. Driver downgrade is LAST resort (bug is below driver layer). |
-| `/etc/default/grub` is empty, `sudo nano /etc/default/grub` does nothing | **Bootloader is systemd-boot, NOT grub.** | Edit `/boot/loader/entries/linux-cachyos.conf` `options` line directly. No `grub-mkconfig` needed. |
-| `.venv/bin/activate (line 40): 'case' builtin not inside of switch block` | fish trying to parse bash-syntax activate script | Wrap in `bash -lc '...'` or drop into `bash` first |
-| Stuck in tmux, `Ctrl+B d` does nothing | Terminal intercepts Ctrl+B | From a second SSH session: `tmux detach-client -s <name>` |
-| `/usr/bin/python: No module named pip` | System Python, not venv | `source ~/ComfyUI/.venv/bin/activate` (under bash) |
-| Browser `ERR_CONNECTION_REFUSED` | Service not running | `frame` |
-| Next on 3001 instead of 3060 | `next dev` ignores `PORT` in `.env.local` | `PORT=3060 npm run dev` |
-| ComfyUI `Node 'LTXVSequenceParallelMultiGPUPatcher' not found` | FrameForge's `workflow-builder.ts` injects it unconditionally | Patch `workflow-builder.ts` to skip on single-GPU systems. |
-
----
-
-## Project structure
-
-```
-videostar/
-├── .env.example
-├── next.config.ts
-├── package.json
-├── setup-comfyui.sh          # needs cu130 patch
-├── scripts/
-│   └── frame                 # canonical /usr/local/bin/frame source
-└── src/
-    └── lib/
-        └── workflow-builder.ts   # injects LTXVSequenceParallelMultiGPUPatcher (TODO)
-```
-
----
-
-## Tech stack
-
-**Frontend:** Next.js 16.2.2, React 19.2, Tailwind 4, TypeScript 5
-**Backend:** ComfyUI 0.18.1, Python 3.14.3, **PyTorch nightly cu130**, LTX-Video 2.3, Gemma 3 12B
-**Hardware:** NVIDIA RTX PRO 4500 Blackwell (32 GB, headless), AMD Radeon (display), 128 GB RAM
+If stuck in tmux: `tmux detach-client -s comfy` from a second SSH session.
 
 ---
 
 ## Session Handoff
 
-### Status as of 2026-04-04 end of session 8 — ROOT CAUSE IDENTIFIED (finally)
+### Status as of 2026-04-04 end of session 8 part 2 — kernel flags live, BIOS is next
 
-**Breakthrough:** Captured the exact crash fingerprint from `journalctl -k -b -1`. It is **not** an Xid. It is **not** a PyTorch bug. It is **not** a ComfyUI config. The failure happens BEFORE any of those layers run.
+**What session 8 proved (in two parts):**
 
-**The actual error chain from dmesg:**
+**Part 1 (dmesg capture):** Got the actual crash fingerprint for the first time. Error is `NVRM: RmInitAdapter failed! (0x22:0x56:894)` happening during driver load, with PCIe hotplug reporting `Link Down` / `Card not present` on root port `0000:00:01.2`. This is BEFORE any CUDA runs. Every prior session's "ComfyUI crash" was actually the first ioctl into a half-dead driver that had silently failed to attach at boot.
+
+**Part 2 (flags applied):** Added `pcie_aspm=off pcie_port_pm=off` to `/boot/loader/entries/linux-cachyos.conf` `options` line via sed. Rebooted. Verified with `cat /proc/cmdline` that flags are live. Post-flag dmesg:
 
 ```
 NVRM: loading NVIDIA UNIX Open Kernel Module for x86_64  595.58.03
-pcieport 0000:00:01.2: pciehp: Slot(0-1): Link Down
-pcieport 0000:00:01.2: pciehp: Slot(0-1): Card not present     ← THE CARD VANISHES FROM THE BUS
 NVRM: osInitNvMapping: *** Cannot attach gpu
 NVRM: RmInitAdapter: osInitNvMapping failed, bailing out of RmInitAdapter
 NVRM: GPU 0000:62:00.0: RmInitAdapter failed! (0x22:0x56:894)
 NVRM: GPU 0000:62:00.0: rm_init_adapter failed, device minor number 0
-pcieport 0000:61:00.0: Unable to change power state from D0 to D3hot, device inaccessible
-... two seconds later ...
-pcieport 0000:00:01.2: pciehp: Slot(0-1): Card present
-pcieport 0000:00:01.2: pciehp: Slot(0-1): Link Up
+No devices were found
 ```
 
-**Translation:** The moment the NVIDIA driver tries to initialize the Blackwell (`NVRM: loading...`), the PCIe hotplug controller on root port `0000:00:01.2` reports the slot as `Link Down` and `Card not present`. The card physically drops off the bus mid-driver-attach. `RmInitAdapter` fails with error code `(0x22:0x56:894)`. Two seconds later the slot comes back up, but NVRM has already given up. For the rest of the boot session, the card is in limbo — `nvidia-smi` may even appear to work — and the first real ioctl into the driver (from `import torch`, ComfyUI, or anything that touches CUDA) wedges the kernel and kills SSH.
+**Critical delta from part 1:** The `pciehp: Slot(0-1): Link Down`, `Card not present`, and `pcieport 0000:61:00.0: Unable to change power state from D0 to D3hot` messages are **GONE**. The kernel flags did their job — the hotplug controller is no longer power-cycling the slot under the driver's feet.
 
-**This is PCIe link training instability, not a driver bug.** The previous sessions' Xid/GSP/driver-downgrade hypothesis was wrong. The card never even gets to a state where Xid errors could happen. We've been debugging the wrong layer for 8 sessions.
+**But RmInitAdapter still fails with the same `(0x22:0x56:894)` code.** This means the ASPM/hotplug power churn was a *symptom*, not the root cause. The real bug is that NVRM cannot map the Blackwell's BARs at init time. On modern NVIDIA cards (especially Blackwell), this is almost always one of:
 
-**Why this is actually great news:**
-- It's a hardware-link-level problem, which has well-known Linux mitigations (PCIe ASPM/PM flags, BIOS generation forcing, reseating).
-- It explains why PyTorch upgrades, cu128→cu130, MultiGPU removal, Ollama stopping, and every other ComfyUI-layer change did nothing — none of them were anywhere near the problem.
-- Open kernel module is confirmed loaded correctly (`NVIDIA UNIX Open Kernel Module`), so that's one less rabbit hole.
+1. **Above 4G Decoding disabled in BIOS** — Blackwell's BAR is >4GB, can't be mapped without this.
+2. **Resizable BAR (ReBAR) disabled in BIOS** — Blackwell expects resizable BAR.
+3. **PCIe link speed negotiation failing at Gen 5** — force Gen 4 (or Gen 3) in BIOS.
+4. **CSM / Legacy boot enabled** — must be off (UEFI-only).
 
-**Confirmed environment facts from session 8:**
-- Bootloader is **systemd-boot 260.1**, not GRUB. `/etc/default/grub` is empty. Kernel cmdline lives in `/boot/loader/entries/linux-cachyos.conf` on the `options` line.
-- Default entry is `linux-cachyos.conf`, fallback is `linux-cachyos-lts.conf`.
-- Current `/proc/cmdline` before the fix: `initrd=\initramfs-linux-cachyos.img root=UUID=e0a02a34-7281-4fbb-b313-adc69090b532 rw rootflags=subvol=/@ zswap.enabled=0 nowatchdog quiet splash`
-- Backup of the conf was created at `/boot/loader/entries/linux-cachyos.conf.bak` during session 8.
+All four are BIOS settings. No more software to try at this layer — we need to get into INSYDE UEFI.
 
 ---
 
-### Session 9 entry point — apply the fix, verify, run the stack
+### Session 9 entry point — BIOS, in order
 
-**Step 1 — Apply PCIe stability flags** (the sed is safe because there's exactly one `options` line in the file; backup was created in session 8):
-```bash
-sudo sed -i '/^options / s/$/ pcie_aspm=off pcie_port_pm=off/' /boot/loader/entries/linux-cachyos.conf
-sudo cat /boot/loader/entries/linux-cachyos.conf
-```
-Verify the `options` line now ends with `... nowatchdog quiet splash pcie_aspm=off pcie_port_pm=off`.
+**Step 1 — Reboot and enter UEFI.** From SSH: `sudo reboot`. As the machine POSTs, mash `F2` repeatedly (INSYDE firmware). You should land in the INSYDE UEFI setup screen.
 
-**Step 2 — Reboot:**
-```bash
-sudo reboot
-```
+**Step 2 — Check/enable these settings** (exact menu paths vary by board, so hunt if needed):
 
-**Step 3 — After reboot, verify the fix landed and the bus stayed up:**
+| Setting | Target value | Likely menu |
+|---|---|---|
+| Above 4G Decoding | **Enabled** | Advanced → PCI Subsystem / PCI Express Configuration |
+| Re-Size BAR Support | **Enabled** | Advanced → PCI Subsystem / PCI Express Configuration (requires Above 4G first) |
+| CSM Support | **Disabled** | Boot / Advanced |
+| Secure Boot | Disabled (already is per `bootctl`) | Security |
+| PCIe slot link speed (slot containing Blackwell) | **Gen 4** (not Auto/Gen 5) | Advanced → PCIe slot config |
+| IOMMU / AMD-Vi | Leave at Auto for now | Advanced → CPU / Chipset |
+
+**Step 3 — Save and exit.** Box reboots into Linux.
+
+**Step 4 — Verify:**
 ```bash
 ssh frame
 bash
-cat /proc/cmdline                                                          # should show new flags
-sudo journalctl -k -b 0 | grep -iE "xid|nvrm|pcieport|pciehp" | tail -80  # should NOT show "Link Down" / "Card not present" / "RmInitAdapter failed"
-nvidia-smi                                                                 # should show Blackwell clean at 32623 MB
+cat /proc/cmdline
+sudo journalctl -k -b 0 | grep -iE "xid|nvrm|pcieport|pciehp" | tail -80
+nvidia-smi
 ```
 
-**Step 4 — If all three are clean, run the stack:**
+**Expected success state:**
+- dmesg shows `NVRM: loading NVIDIA UNIX Open Kernel Module...` with NO `RmInitAdapter failed` after it
+- `nvidia-smi` lists the Blackwell with 32623 MiB, driver 595.58.03, zero processes, no error
+- `No devices were found` is GONE
+
+**Step 5 — If all clean, run the stack:**
 ```bash
 frame
-tmux capture-pane -t comfy -p | tail -80
+tmux capture-pane -t comfy -p | tail -100
 ```
-Watch for ComfyUI to finish startup without wedging the box. If it does finish startup, open http://192.168.4.176:3060 from the Mac and try generating the shiba inu test video.
+Wait for ComfyUI to print `Starting server` without wedging. Then open http://192.168.4.176:3060 from the Mac and generate the shiba inu test video.
 
 ---
 
-### If the fix doesn't work — escalation ladder
+### Escalation ladder if BIOS doesn't fix it
 
-**Escalation 1: Disable PCIe hotplug entirely.**
-If dmesg still shows `pciehp: Slot(0-1): Link Down` after the ASPM/PM flags, the hotplug driver is still power-cycling the slot. Add `pci=nomsi` and/or blacklist `pciehp`:
-```bash
-sudo sed -i '/^options / s/$/ pci=noaer pciehp.pciehp_force=0/' /boot/loader/entries/linux-cachyos.conf
-# Or, more aggressively, blacklist the pciehp module:
-echo "blacklist pciehp" | sudo tee /etc/modprobe.d/blacklist-pciehp.conf
-sudo mkinitcpio -P
-sudo reboot
-```
+**Escalation 1: Try Gen 3 instead of Gen 4.** Some boards are marginal even at Gen 4 with new Blackwell silicon.
 
-**Escalation 2: Force PCIe Gen 4 in BIOS.**
-Reboot into UEFI (tap `F2` or `Del` during POST — this is an INSYDE firmware per `bootctl status`). Navigate to PCIe configuration. Find the slot containing the Blackwell (PCIe `62:00.0`, usually "PCIE Slot 1" or similar). Change the link speed from `Auto` / `Gen 5` to `Gen 4`. Save and reboot. Re-verify with `journalctl -k -b 0`. If Gen 4 still drops, try Gen 3.
+**Escalation 2: Try another PCIe slot.** If the board has a second x16 slot, move the Blackwell there. Some boards have BIOS bugs where only the primary slot gets full init, others where the secondary is more tolerant.
 
-**Escalation 3: Reseat + power.**
-Power off, unplug. Remove the card, inspect the PCIe fingers and slot for debris. Reseat firmly until the retention clip clicks. Unplug and replug both 12VHPWR / PCIe power connectors on the card AND at the PSU. Check the PSU wattage — RTX PRO 4500 Blackwell is ~200W TBP with significant transient spikes; a marginal PSU can cause link training failures.
+**Escalation 3: Reseat + power connectors.** Power off, unplug wall, pop the card out, check fingers/slot, push back in until the retention clip clicks. Unplug + replug both ends of the 12VHPWR / PCIe power cable. RTX PRO 4500 Blackwell transient spikes can cause a borderline PSU to brownout during link training.
 
 **Escalation 4: Driver downgrade to 580.126.09.**
-Only do this if 1–3 all fail. The web-research path from session 7 is still valid as a last resort, but it's no longer the leading hypothesis:
 ```bash
 pacman -Ss nvidia-open
 sudo downgrade nvidia-open nvidia-utils nvidia-settings
@@ -264,23 +231,30 @@ sudo sed -i 's/^#IgnorePkg.*/IgnorePkg = nvidia-open nvidia-utils nvidia-setting
 sudo reboot
 ```
 
-**Escalation 5: Swap the card** into a different PCIe slot, or test with a non-Blackwell GPU to prove the failure is card-specific vs slot-specific vs motherboard-specific.
+**Escalation 5: Kernel cmdline exotic flags.**
+```bash
+sudo sed -i '/^options / s/$/ pci=noaer pci=realloc=on/' /boot/loader/entries/linux-cachyos.conf
+```
+(`pci=realloc=on` forces the kernel to reallocate BARs, which can work around firmware that mis-sizes them.)
+
+**Escalation 6: Swap in a non-Blackwell GPU** (RTX 4090 or older) to prove the failure is Blackwell-specific vs motherboard-general.
 
 ---
 
 ### What we've conclusively eliminated across sessions 1–8
 
-| Variable | How it was tested | Result |
-|---|---|---|
-| PyTorch cu128 vs cu130 | Upgraded to nightly cu130 | Ruled out |
-| Ollama GPU squatting | `sudo systemctl stop ollama` via frame script | Ruled out |
-| fish shell parsing `.venv/bin/activate` | Wrapped in `bash -lc` | Ruled out |
-| ComfyUI-MultiGPU custom node | Parked out of `custom_nodes/`, crash persisted | Ruled out |
-| NVIDIA driver 595 CUDA runtime bug | dmesg shows failure is at PCIe layer, before any CUDA | Ruled out (for now) |
-| Xid 109/119 GSP firmware crash | dmesg shows ZERO Xid entries — crash is pre-Xid | Ruled out |
-| Proprietary vs open kernel module | dmesg confirms `NVIDIA UNIX Open Kernel Module` | Correct one is loaded |
+| Variable | Result |
+|---|---|
+| PyTorch cu128 vs cu130 | Ruled out |
+| Ollama GPU squatting | Ruled out |
+| fish shell parsing `.venv/bin/activate` | Ruled out (fixed via `bash -lc`) |
+| ComfyUI-MultiGPU custom node | Ruled out |
+| NVIDIA driver 595 CUDA runtime | Ruled out (failure is pre-CUDA) |
+| Xid 109/119 GSP firmware | Ruled out (zero Xid entries in dmesg) |
+| Proprietary vs open kernel module | Confirmed correct (open is loaded) |
+| **PCIe ASPM / hotplug power churn** | **Ruled out (flags applied, symptoms gone, attach still fails)** |
 
-**Session 8's actual contribution:** Got the dmesg from a crashed boot. That's the artifact we'd been missing. Every prior session was guessing because we had no kernel-side evidence — only the symptom (SSH dying).
+**Remaining unknowns:** BIOS BAR settings, PCIe link speed negotiation, physical seating, PSU headroom.
 
 ---
 
@@ -291,4 +265,4 @@ sudo reboot
 3. Patch `package.json` `"dev"` script to `"next dev -p 3060"`.
 4. Verify LTX-Video 2.3 checkpoint + Gemma 3 text encoder are downloaded.
 5. systemd user units for auto-start on boot.
-6. Bake the `pcie_aspm=off pcie_port_pm=off` flags into the `linux-cachyos-lts.conf` fallback entry too, so rescue-boot stays stable.
+6. Mirror kernel cmdline flags into `linux-cachyos-lts.conf` fallback entry.
