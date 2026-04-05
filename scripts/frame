@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# FrameForge one-shot startup
+#
+# Brings up the entire FrameForge stack on the Framestation with a single
+# command. Designed to be installed at /usr/local/bin/frame so it can be
+# invoked from any folder after SSH'ing in.
+#
+# Install (one-time, from the Framestation):
+#     sudo install -m 755 scripts/frame /usr/local/bin/frame
+#
+# Run:
+#     frame
+#
+# What it does:
+#   1. Stops Ollama to release any VRAM it's holding on the NVIDIA card.
+#      (Ollama on the same box is a known cause of cudaErrorDevicesUnavailable
+#       when ComfyUI calls torch.cuda.mem_get_info() during startup.)
+#   2. Kills any stale `comfy` or `frame` tmux sessions so we always start clean.
+#   3. Launches ComfyUI in a detached tmux session named `comfy`.
+#   4. Launches Next.js (FrameForge) in a detached tmux session named `frame`.
+#   5. Prints the URLs and tmux attach commands.
+#
+# Because both services run under `tmux new-session -d`, closing your SSH
+# terminal does NOT kill them. That was the lesson from the "Next.js is down
+# because I closed the tab" episodes.
+#
+# Watch logs:     tmux attach -t comfy   (or -t frame)
+# Detach:         Ctrl+B then d
+# Restart Ollama: sudo systemctl start ollama
+
+set -e
+
+echo "→ Stopping Ollama to free GPU VRAM..."
+sudo systemctl stop ollama 2>/dev/null || true
+
+echo "→ Killing stale tmux sessions..."
+tmux kill-session -t comfy 2>/dev/null || true
+tmux kill-session -t frame 2>/dev/null || true
+
+echo "→ Starting ComfyUI in tmux..."
+tmux new-session -d -s comfy "cd /home/lynf/ComfyUI && source .venv/bin/activate && python main.py --listen 0.0.0.0 --port 8188; exec bash"
+
+echo "→ Starting FrameForge (Next.js) in tmux..."
+tmux new-session -d -s frame "cd /home/lynf/videostar && PORT=3060 npm run dev; exec bash"
+
+echo ""
+echo "✓ FrameForge stack started."
+echo "  ComfyUI:    http://192.168.4.176:8188"
+echo "  FrameForge: http://192.168.4.176:3060"
+echo ""
+echo "  Watch ComfyUI:    tmux attach -t comfy"
+echo "  Watch Next.js:    tmux attach -t frame"
+echo "  Detach from tmux: Ctrl+B then d"
+echo "  Restart Ollama:   sudo systemctl start ollama"
+echo ""
