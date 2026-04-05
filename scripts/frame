@@ -16,13 +16,18 @@
 #      (Ollama on the same box is a known cause of cudaErrorDevicesUnavailable
 #       when ComfyUI calls torch.cuda.mem_get_info() during startup.)
 #   2. Kills any stale `comfy` or `frame` tmux sessions so we always start clean.
-#   3. Launches ComfyUI in a detached tmux session named `comfy`.
-#   4. Launches Next.js (FrameForge) in a detached tmux session named `frame`.
+#   3. Launches ComfyUI in a detached tmux session named `comfy` under bash.
+#   4. Launches Next.js (FrameForge) in a detached tmux session named `frame`
+#      under bash.
 #   5. Prints the URLs and tmux attach commands.
 #
+# IMPORTANT: both tmux sessions are wrapped in `bash -lc '...'` because the
+# default login shell on CachyOS is fish, and fish cannot source bash-syntax
+# files like `.venv/bin/activate` (fails with: 'case' builtin not inside of
+# switch block). Forcing bash for the subprocess fixes this cleanly.
+#
 # Because both services run under `tmux new-session -d`, closing your SSH
-# terminal does NOT kill them. That was the lesson from the "Next.js is down
-# because I closed the tab" episodes.
+# terminal does NOT kill them.
 #
 # Watch logs:     tmux attach -t comfy   (or -t frame)
 # Detach:         Ctrl+B then d
@@ -37,11 +42,11 @@ echo "→ Killing stale tmux sessions..."
 tmux kill-session -t comfy 2>/dev/null || true
 tmux kill-session -t frame 2>/dev/null || true
 
-echo "→ Starting ComfyUI in tmux..."
-tmux new-session -d -s comfy "cd /home/lynf/ComfyUI && source .venv/bin/activate && python main.py --listen 0.0.0.0 --port 8188; exec bash"
+echo "→ Starting ComfyUI in tmux (under bash)..."
+tmux new-session -d -s comfy "bash -lc 'cd /home/lynf/ComfyUI && source .venv/bin/activate && python main.py --listen 0.0.0.0 --port 8188; exec bash'"
 
-echo "→ Starting FrameForge (Next.js) in tmux..."
-tmux new-session -d -s frame "cd /home/lynf/videostar && PORT=3060 npm run dev; exec bash"
+echo "→ Starting FrameForge (Next.js) in tmux (under bash)..."
+tmux new-session -d -s frame "bash -lc 'cd /home/lynf/videostar && PORT=3060 npm run dev; exec bash'"
 
 echo ""
 echo "✓ FrameForge stack started."
