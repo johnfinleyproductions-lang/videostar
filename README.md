@@ -19,20 +19,21 @@ Flow: Browser → FrameForge UI builds a ComfyUI workflow → POSTs it to ComfyU
 
 ---
 
-## ✅ GPU STATUS: WORKING (Session 12+, April 7 2026)
+## ✅ GPU STATUS: WORKING — VIDEO GENERATION CONFIRMED (Session 13, April 7 2026)
 
-**The RTX PRO 4500 Blackwell is detected and operational.**
+**The RTX PRO 4500 Blackwell is detected, CUDA-stable, and generating video.**
 
 ```
 NVIDIA-SMI 595.58.03    Driver Version: 595.58.03    CUDA Version: 13.2
-GPU 0: NVIDIA RTX PRO 4500 Blackwell   32623 MiB   Bus 62:00.0   28°C   7W/200W
+GPU 0: NVIDIA RTX PRO 4500 Blackwell   32623 MiB   Bus 62:00.0
 ```
 
-### What fixed it — THREE things simultaneously
+### What fixed it — FOUR things
 
 1. **`nvidia-open-dkms` (not proprietary)** — NVIDIA restricts RTX PRO Blackwell (PCI ID `10de:2c31`) to open kernel modules only. Proprietary `nvidia-580xx-dkms` rejects the card with error `(0x22:0x56:897)`.
 2. **`thunderbolt` early-loaded in initramfs** — Added to MODULES in `/etc/mkinitcpio.conf` so the Thunderbolt subsystem initializes before `nvidia_drm` tries to probe the card.
-3. **`NVreg_EnableGpuFirmware=0` in modprobe.d** — Config in `/etc/modprobe.d/nvidia-gsp.conf`. **NOTE:** This is effectively ignored by `nvidia-open-dkms` because the open kernel modules REQUIRE GSP firmware (confirmed via GitHub Discussion #667). It was part of the original fix attempt and is harmless to leave, but the real fix is items 1 + 2 + the clock locking below.
+3. **GPU clock locking** — Clocks MUST be locked at a fixed speed (min=max) before any CUDA workload. See critical section below.
+4. **`NVreg_EnableGpuFirmware=0` in modprobe.d** — Config in `/etc/modprobe.d/nvidia-gsp.conf`. **NOTE:** This is effectively ignored by `nvidia-open-dkms` because the open kernel modules REQUIRE GSP firmware (confirmed via GitHub Discussion #667). Harmless to leave.
 
 ---
 
@@ -40,28 +41,28 @@ GPU 0: NVIDIA RTX PRO 4500 Blackwell   32623 MiB   Bus 62:00.0   28°C   7W/200W
 
 **Blackwell GPUs over USB4/Thunderbolt suffer CUDA hard-locks when the GPU changes power states.** This is a known upstream bug ([NVIDIA/open-gpu-kernel-modules #979](https://github.com/NVIDIA/open-gpu-kernel-modules/issues/979)). When the GPU transitions between power states, the PCIe link renegotiates through the USB4/Thunderbolt tunnel and crashes.
 
-**The workaround is to lock GPU clocks so power states never change.** These three commands MUST run before ANY CUDA workload (ComfyUI, PyTorch, anything) after every reboot:
+### The rules
 
-```bash
-sudo nvidia-smi -pm 1              # Enable persistence mode (keeps driver loaded)
-sudo nvidia-smi -lgc 300,300       # Lock GPU clocks to 300 MHz (prevents state transitions)
-sudo nvidia-smi -pl 150            # Set power limit to 150W (minimum for this card)
-```
+1. **Clocks MUST be locked (min = max).** A range like `300,900` will crash because the GPU transitions within the range.
+2. **Clocks MUST be set BEFORE any CUDA workload.** Changing clocks while ComfyUI is generating will instantly crash the GPU.
+3. **The `frame` script handles this automatically.** Just use `frame` or `frame <speed>`.
 
-**What happens without clock locking:** The system hard-locks (frozen screen, no SSH, requires power cycle) within seconds of any CUDA compute. Even a simple `torch.randn(4000, 4000, device="cuda")` will crash the system.
+### Tested clock speeds (April 7 2026)
 
-**The `frame` startup script does this automatically.** If you start ComfyUI manually, you MUST run these commands first.
+| Command | Speed | Status | Est. time for 4s 512p video | Power draw |
+|---|---|---|---|---|
+| `frame` or `frame 300` | 300 MHz | ✅ STABLE | ~25 min | ~23W |
+| `frame 450` | 450 MHz | ✅ STABLE | ~15-20 min | ~26W |
+| `frame 700` | 700 MHz | ✅ STABLE | ~8-12 min | ~35-50W |
+| `frame 900` | 900 MHz | ❌ CRASH | — | — |
+| `-lgc 300,900` (range) | 300-900 | ❌ CRASH | — | — |
+| `-lgc 300,1800` (range) | 300-1800 | ❌ CRASH | — | — |
 
-### Raising clocks for performance
+**Current recommended setting: `frame 700`** — best balance of speed and stability.
 
-300 MHz is stable but very slow for inference. Once you confirm stability, you can raise clocks incrementally:
+### What happens without clock locking
 
-```bash
-sudo nvidia-smi -lgc 300,1500    # Test: faster but still locked range
-sudo nvidia-smi -lgc 300,2100    # Full speed (may crash — test carefully)
-```
-
-If a higher clock range crashes, drop back to the last stable value. The key is that the MIN and MAX must be close enough that the GPU doesn't attempt a power state transition.
+The system hard-locks (frozen screen, no SSH, requires power cycle) within seconds of any CUDA compute. Even a simple `torch.randn(4000, 4000, device="cuda")` will crash the system. The crash is caused by the GPU attempting a power state transition, which triggers PCIe link renegotiation through the USB4/Thunderbolt tunnel.
 
 ---
 
@@ -69,39 +70,46 @@ If a higher clock range crashes, drop back to the last stable value. The key is 
 
 **Every new Claude/AI session working on FrameForge must read this entire README before asking the user any setup questions.**
 
-**Top-14 gotchas:**
+**Top-15 gotchas:**
 1. **The GPU is on Thunderbolt 5 / USB4, not OCuLink and not a motherboard slot.**
-2. **🔴 GPU CLOCK LOCKING IS MANDATORY before any CUDA workload. See section above.**
-3. **ComfyUI runs inside a Python venv** at `~/ComfyUI/.venv`. Always `source ~/ComfyUI/.venv/bin/activate` BEFORE any pip command.
-4. **`next dev` does NOT read `PORT` from `.env.local`.** Always `PORT=3060 npm run dev`.
-5. **No stray `package.json` in `/home/lynf/`** — breaks Turbopack.
-6. **`ssh frame` only works from the Mac.**
-7. **Services die when their terminal closes.** Always use tmux via the `frame` script.
-8. **🔥 PyTorch CUDA version MUST match the NVIDIA driver CUDA version.** On open 595.58.03 → cu130.
-9. **🔥 Ollama is a GPU squatter.** `sudo systemctl stop ollama` BEFORE starting ComfyUI.
-10. **🔥🔥 Default login shell is FISH, not bash.** The ComfyUI venv activate script does NOT work in fish. Always wrap commands in `bash -c '...'` or use the `frame` script.
-11. **🔥🔥🔥 Bootloader is systemd-boot, NOT GRUB.** Kernel cmdline in `/boot/loader/entries/linux-cachyos.conf`.
-12. **🔥🔥🔥🔥 `lspci` reports Gen 1 x1 for USB4 devices on Linux by design.** Red herring.
-13. **🔥🔥🔥🔥🔥 RTX PRO Blackwell REQUIRES `nvidia-open-dkms`.** No proprietary path.
-14. **🔥🔥🔥🔥🔥🔥 `NVreg_EnableGpuFirmware=0` is IGNORED by nvidia-open-dkms.** Open modules require GSP. The modprobe.d config is harmless but does nothing on the open driver.
+2. **🔴 GPU CLOCK LOCKING IS MANDATORY before any CUDA workload. Use `frame <speed>`. See section above.**
+3. **🔴 NEVER change GPU clocks while a generation is running. It will crash the system.**
+4. **ComfyUI runs inside a Python venv** at `~/ComfyUI/.venv`. Always `source ~/ComfyUI/.venv/bin/activate` BEFORE any pip command.
+5. **`next dev` does NOT read `PORT` from `.env.local`.** Always `PORT=3060 npm run dev`.
+6. **No stray `package.json` in `/home/lynf/`** — breaks Turbopack.
+7. **`ssh frame` only works from the Mac.**
+8. **Services die when their terminal closes.** Always use tmux via the `frame` script.
+9. **🔥 PyTorch CUDA version MUST match the NVIDIA driver CUDA version.** On open 595.58.03 → cu130.
+10. **🔥 Ollama is a GPU squatter.** `sudo systemctl stop ollama` BEFORE starting ComfyUI.
+11. **🔥🔥 Default login shell is FISH, not bash.** The ComfyUI venv activate script does NOT work in fish. Always wrap commands in `bash -c '...'` or use the `frame` script.
+12. **🔥🔥🔥 Bootloader is systemd-boot, NOT GRUB.** Kernel cmdline in `/boot/loader/entries/linux-cachyos.conf`.
+13. **🔥🔥🔥🔥 `lspci` reports Gen 1 x1 for USB4 devices on Linux by design.** Red herring.
+14. **🔥🔥🔥🔥🔥 RTX PRO Blackwell REQUIRES `nvidia-open-dkms`.** No proprietary path.
+15. **🔥🔥🔥🔥🔥🔥 `NVreg_EnableGpuFirmware=0` is IGNORED by nvidia-open-dkms.** Open modules require GSP. The modprobe.d config is harmless but does nothing on the open driver.
 
 ---
 
 ## Model Setup
 
-### Required models (all downloaded)
+### Required models (all downloaded and verified)
 
 ```
 📂 ComfyUI/models/
 ├── 📂 checkpoints/
 │   └── ltx-2.3-22b-dev.safetensors          # 46.1 GB — main AV model
 ├── 📂 text_encoders/
-│   ├── 📂 gemma-3-12b-it-fp8/               # 27 GB — community fp8 conversion
-│   │   └── comfy_gemma_3_12B_it_fp8_e4m3fn.safetensors
+│   ├── 📂 gemma-3-12b-it-fp8/               # Community fp8 conversion
+│   │   └── gemma_3_12B_it_fp8_e4m3fn.safetensors   # 13 GB — actual file
 │   └── comfy_gemma_3_12B_it.safetensors      # ← symlink to fp8 file above
 └── 📂 loras/
     └── 📂 ltxv/ltx2/
         └── ltx-2.3-22b-distilled-lora-384.safetensors  # 7.61 GB — distilled LoRA
+```
+
+**IMPORTANT: Symlink gotcha.** The Gemma fp8 file in the community repo is named `gemma_3_12B_it_fp8_e4m3fn.safetensors` (no `comfy_` prefix). The symlink MUST point to the correct filename:
+
+```bash
+ln -sf /home/lynf/ComfyUI/models/text_encoders/gemma-3-12b-it-fp8/gemma_3_12B_it_fp8_e4m3fn.safetensors /home/lynf/ComfyUI/models/text_encoders/comfy_gemma_3_12B_it.safetensors
 ```
 
 ### Download commands (if starting fresh)
@@ -113,11 +121,11 @@ source .venv/bin/activate
 # Checkpoint (46 GB)
 python -c "from huggingface_hub import hf_hub_download; hf_hub_download('Lightricks/LTX-2.3', 'ltx-2.3-22b-dev.safetensors', local_dir='models/checkpoints')"
 
-# Gemma fp8 text encoder (27 GB) — use community conversion, NOT gated Google repo
+# Gemma fp8 text encoder (13 GB) — use community conversion, NOT gated Google repo
 python -c "from huggingface_hub import snapshot_download; snapshot_download('GitMylo/LTX-2-comfy_gemma_fp8_e4m3fn', local_dir='models/text_encoders/gemma-3-12b-it-fp8')"
 
-# Create symlink so ComfyUI finds it
-ln -sf gemma-3-12b-it-fp8/comfy_gemma_3_12B_it_fp8_e4m3fn.safetensors models/text_encoders/comfy_gemma_3_12B_it.safetensors
+# Create symlink so ComfyUI finds it (note: actual filename has NO comfy_ prefix)
+ln -sf /home/lynf/ComfyUI/models/text_encoders/gemma-3-12b-it-fp8/gemma_3_12B_it_fp8_e4m3fn.safetensors /home/lynf/ComfyUI/models/text_encoders/comfy_gemma_3_12B_it.safetensors
 
 # Distilled LoRA (7.6 GB)
 python -c "from huggingface_hub import hf_hub_download; hf_hub_download('Lightricks/LTX-2.3', 'ltx-2.3-22b-distilled-lora-384.safetensors', local_dir='models/loras/ltxv/ltx2')"
@@ -136,21 +144,34 @@ python -c "from huggingface_hub import hf_hub_download; hf_hub_download('Lightri
 
 ## Shortcuts and configuration
 
-### Shell aliases and commands
+### The `frame` startup script
+
+| Command | What it does |
+|---|---|
+| `frame` | Starts everything at 300 MHz (safest) |
+| `frame 450` | Starts at 450 MHz (1.5x faster) |
+| `frame 700` | Starts at 700 MHz (2.3x faster) — **recommended** |
+
+The script (at `/usr/local/bin/frame`) does, in order:
+1. Stops Ollama (`sudo systemctl stop ollama`)
+2. Enables GPU persistence mode
+3. Locks GPU clocks to the specified speed (min=max, no transitions)
+4. Sets power limit to 150W
+5. Kills any stale tmux sessions
+6. Starts ComfyUI in tmux session `comfy` (bash, venv activated)
+7. Waits 5 seconds for ComfyUI to initialize
+8. Starts Next.js dev server on port 3060 in tmux session `framenext`
+
+**Install/update after git pull:**
+```bash
+cd /home/lynf/videostar && git pull && sudo install -m 755 scripts/frame /usr/local/bin/frame
+```
+
+### Other shortcuts
 
 | Name | Where | What it does |
 |---|---|---|
-| `frame` | `/usr/local/bin/frame` | **Stabilizes GPU clocks**, stops Ollama, starts ComfyUI + Next.js in tmux |
 | `ssh frame` | **Mac only** `~/.ssh/config` | Shortcut to `ssh lynf@192.168.4.176` |
-
-### What the `frame` script does (in order)
-
-1. Checks `nvidia-smi` is responsive (exits if GPU not detected)
-2. Runs GPU stabilization: `nvidia-smi -pm 1`, `-lgc 300,300`, `-pl 150`
-3. Stops Ollama (`sudo systemctl stop ollama`)
-4. Starts ComfyUI in tmux session `framenext` (bash, venv activated)
-5. Waits 5 seconds for ComfyUI to initialize
-6. Starts Next.js dev server on port 3060 in same tmux session
 
 ### systemd-boot kernel cmdline (`/boot/loader/entries/linux-cachyos.conf`)
 
@@ -217,11 +238,15 @@ options root=UUID=e0a02a34-7281-4fbb-b313-adc69090b532 rw rootflags=subvol=/@ zs
 | Kernel | Linux 6.19.11-1-cachyos |
 | NVIDIA driver | nvidia-open-dkms 595.58.03 |
 | CUDA | 13.2 |
+| Python | 3.14.3 |
+| PyTorch | 2.12.0.dev20260404+cu130 |
+| ComfyUI | 0.18.1 |
 | LAN IP | 192.168.4.176/22 |
 | SSH user | `lynf` |
-| ComfyUI | `/home/lynf/ComfyUI` (venv at `.venv`, bash-only) |
-| FrameForge | `/home/lynf/videostar` |
+| ComfyUI dir | `/home/lynf/ComfyUI` (venv at `.venv`, bash-only) |
+| FrameForge dir | `/home/lynf/videostar` |
 | Ports | 8188 (ComfyUI), 3060 (Next.js) |
+| Max stable clock | 700 MHz (locked, min=max) |
 
 ---
 
@@ -231,7 +256,7 @@ The RTX PRO 4500 Blackwell uses a RISC-V GSP (GPU System Processor) that must co
 
 On top of that, NVIDIA's proprietary driver branch flat-out refuses to load for this SKU — it's on an internal allow-list that mandates `nvidia-open-dkms`. Sessions 9–10 wasted time on the proprietary driver because the error code progression (`894 → 897`) was misread as "progress" when it was actually "rejection."
 
-Even after driver detection works, CUDA compute causes hard-locks because Blackwell over USB4 crashes when the GPU changes power states (PCIe link renegotiation through the Thunderbolt tunnel). Clock locking prevents this by keeping the GPU in a single power state.
+Even after driver detection works, CUDA compute causes hard-locks because Blackwell over USB4 crashes when the GPU changes power states (PCIe link renegotiation through the Thunderbolt tunnel). Clock locking (with min=max to prevent any transitions) prevents this by keeping the GPU in a single, fixed power state. Clock ranges (e.g. 300,900) still crash because the GPU transitions within the range.
 
 ---
 
@@ -239,11 +264,19 @@ Even after driver detection works, CUDA compute causes hard-locks because Blackw
 
 ### System crashes when running ComfyUI or any CUDA workload
 **Cause:** GPU clock locking not applied. The GPU transitions power states and crashes the PCIe/USB4 tunnel.
-**Fix:** Run the three `nvidia-smi` commands (pm 1, lgc 300,300, pl 150) BEFORE starting ComfyUI. Use the `frame` script which does this automatically.
+**Fix:** Use `frame` or `frame 700` which locks clocks automatically before starting ComfyUI.
+
+### System crashes after changing GPU clocks
+**Cause:** Clocks were changed while a CUDA workload was running, or a clock range was used instead of a fixed value.
+**Fix:** NEVER change clocks mid-inference. Always kill ComfyUI first (`tmux kill-session -t comfy`), change clocks, then restart. Always use locked clocks (min=max): `nvidia-smi -lgc 700,700` not `nvidia-smi -lgc 300,700`.
 
 ### ComfyUI starts but workflow fails with "value_not_in_list" for checkpoint
 **Cause:** Workflow references a model file that doesn't exist on disk.
 **Fix:** Verify files exist in `~/ComfyUI/models/checkpoints/`. The current correct checkpoint is `ltx-2.3-22b-dev.safetensors`.
+
+### "Model in folder 'text_encoders' with filename 'comfy_gemma_3_12B_it.safetensors' not found"
+**Cause:** The symlink to the Gemma fp8 text encoder is broken. The community fp8 file is named `gemma_3_12B_it_fp8_e4m3fn.safetensors` (no `comfy_` prefix) but the symlink may have been created pointing to the wrong name.
+**Fix:** Recreate with correct target: `ln -sf /home/lynf/ComfyUI/models/text_encoders/gemma-3-12b-it-fp8/gemma_3_12B_it_fp8_e4m3fn.safetensors /home/lynf/ComfyUI/models/text_encoders/comfy_gemma_3_12B_it.safetensors`
 
 ### "Required input is missing: audio_vae" error
 **Cause:** Old workflow missing the LTXVAudioVAELoader node, or referencing wrong checkpoint.
@@ -295,17 +328,18 @@ RandomNoise ──► SamplerCustomAdvanced ◄── KSamplerSelect            
 ## TODO
 
 1. ~~GPU detection~~ **DONE**
-2. ~~CUDA compute stability~~ **DONE** (clock locking workaround)
+2. ~~CUDA compute stability~~ **DONE** (clock locking workaround, 700 MHz max stable)
 3. ~~Model downloads~~ **DONE** (checkpoint, Gemma fp8, distilled LoRA)
 4. ~~Workflow rewrite~~ **DONE** (workflow-builder.ts updated for LTX-2.3 AV API)
-5. ~~Frame script GPU stabilization~~ **DONE** (auto-runs nvidia-smi before ComfyUI)
-6. **Test end-to-end video generation** ← CURRENT
-7. **Raise GPU clocks for performance** — test 300-1500, then 300-2100
-8. **Fix SSH from Mac** — KEXINIT hanging, suspected Docker iptables
-9. Mirror kernel cmdline into `linux-cachyos-lts.conf`
-10. Remove `nvidia.NVreg_EnableMSI=0` from cmdline (perf improvement)
-11. Create systemd user units for auto-start on boot
-12. File upstream bug on NVIDIA/open-gpu-kernel-modules linking diagnosis to #974/#979/#1064
+5. ~~Frame script GPU stabilization~~ **DONE** (accepts clock speed arg: `frame 700`)
+6. ~~Gemma symlink fix~~ **DONE** (correct filename without comfy_ prefix)
+7. **Confirm first video generation completes end-to-end** ← CURRENT
+8. **Test 750 MHz and 800 MHz** to narrow the max stable clock
+9. **Fix SSH from Mac** — KEXINIT hanging, suspected Docker iptables
+10. Mirror kernel cmdline into `linux-cachyos-lts.conf`
+11. Remove `nvidia.NVreg_EnableMSI=0` from cmdline (perf improvement)
+12. Create systemd user units for auto-start on boot
+13. File upstream bug on NVIDIA/open-gpu-kernel-modules linking diagnosis to #974/#979/#1064
 
 ---
 
