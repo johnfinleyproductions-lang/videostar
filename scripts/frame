@@ -9,31 +9,31 @@
 #     sudo install -m 755 scripts/frame /usr/local/bin/frame
 #
 # Run:
-#     frame
+#     frame          # default 300 MHz (safest)
+#     frame 450      # lock at 450 MHz (1.5x faster)
+#     frame 600      # lock at 600 MHz (2x faster)
+#     frame 900      # lock at 900 MHz (3x faster, may crash)
 #
 # What it does:
 #   1. Stops Ollama to release any VRAM it's holding on the NVIDIA card.
 #   2. Stabilizes the GPU for Thunderbolt operation:
 #      - Enables persistence mode (keeps driver loaded between CUDA calls)
-#      - Locks GPU clocks to 300 MHz (prevents power state transitions
+#      - Locks GPU clocks to a FIXED speed (prevents power state transitions
 #        that crash the PCIe link over USB4/Thunderbolt — see
 #        NVIDIA/open-gpu-kernel-modules #979)
 #      - Sets power limit to minimum (150W) as safety net
-#   3. Kills any stale `comfy` or `frame` tmux sessions.
+#   3. Kills any stale tmux sessions.
 #   4. Launches ComfyUI in a detached tmux session named `comfy` under bash.
 #   5. Launches Next.js (FrameForge) in a detached tmux session named `framenext`.
 #   6. Prints the URLs and tmux attach commands.
 #
+# IMPORTANT: Clock speed MUST be set BEFORE any CUDA workload starts.
+# Changing clocks mid-inference will crash the USB4 link.
+# That's why this script sets clocks first, then starts ComfyUI.
+#
 # IMPORTANT: both tmux sessions are wrapped in `bash -lc '...'` because the
 # default login shell on CachyOS is fish, and fish cannot source bash-syntax
 # files like `.venv/bin/activate`.
-#
-# GPU CLOCK NOTE: 300 MHz is very conservative and will be slow for inference.
-# Once stability is confirmed, raise with:
-#     sudo nvidia-smi -lgc 300,1500
-# If that's stable, try:
-#     sudo nvidia-smi -lgc 300,2100
-# The max boost clock for RTX PRO 4500 Blackwell is ~2100 MHz.
 #
 # Watch logs:     tmux attach -t comfy   (or -t framenext)
 # Detach:         Ctrl+B then d
@@ -41,15 +41,18 @@
 
 set -e
 
+# Accept optional clock speed argument (default: 300 MHz)
+GPU_CLOCK="${1:-300}"
+
 echo "→ Stopping Ollama to free GPU VRAM..."
 sudo systemctl stop ollama 2>/dev/null || true
 
 echo "→ Stabilizing GPU for Thunderbolt operation..."
 if nvidia-smi &>/dev/null; then
     sudo nvidia-smi -pm 1
-    sudo nvidia-smi -lgc 300,300
+    sudo nvidia-smi -lgc "${GPU_CLOCK},${GPU_CLOCK}"
     sudo nvidia-smi -pl 150
-    echo "  ✓ Persistence mode ON, clocks locked at 300 MHz, power limit 150W"
+    echo "  ✓ Persistence mode ON, clocks locked at ${GPU_CLOCK} MHz, power limit 150W"
 else
     echo "  ✗ WARNING: nvidia-smi not responding — GPU may not be available"
     echo "  Continuing anyway in case it recovers..."
@@ -80,7 +83,10 @@ echo "  Watch Next.js:    tmux attach -t framenext"
 echo "  Detach from tmux: Ctrl+B then d"
 echo "  Restart Ollama:   sudo systemctl start ollama"
 echo ""
-echo "  GPU clocks locked at 300 MHz for stability."
-echo "  To raise for faster inference (if stable):"
-echo "    sudo nvidia-smi -lgc 300,1500"
+echo "  GPU clocks locked at ${GPU_CLOCK} MHz."
+if [ "$GPU_CLOCK" -eq 300 ] 2>/dev/null; then
+    echo "  To try faster (set BEFORE generating, not during):"
+    echo "    frame 450    # 1.5x speed"
+    echo "    frame 600    # 2x speed"
+fi
 echo ""
