@@ -18,7 +18,11 @@ import { durationToFrames } from "./models";
 // ---------------------------------------------------------------------------
 // Model file names — must match what is on disk in ComfyUI/models/
 // ---------------------------------------------------------------------------
-const CHECKPOINT = "ltx-2.3-22b-dev.safetensors";
+// Using fp8 checkpoint for faster generation and lower VRAM usage.
+// Blackwell (sm_120) has native fp8 tensor cores — this is the optimal path.
+// The full-precision checkpoint (ltx-2.3-22b-dev.safetensors) is also available
+// if higher quality is needed.
+const CHECKPOINT = "ltx-2.3-22b-dev-fp8.safetensors";
 const GEMMA_ENCODER = "comfy_gemma_3_12B_it.safetensors";
 const DISTILLED_LORA = "ltxv/ltx2/ltx-2.3-22b-distilled-lora-384.safetensors";
 
