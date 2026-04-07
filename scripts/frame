@@ -13,23 +13,29 @@
 #
 # What it does:
 #   1. Stops Ollama to release any VRAM it's holding on the NVIDIA card.
-#      (Ollama on the same box is a known cause of cudaErrorDevicesUnavailable
-#       when ComfyUI calls torch.cuda.mem_get_info() during startup.)
-#   2. Kills any stale `comfy` or `frame` tmux sessions so we always start clean.
-#   3. Launches ComfyUI in a detached tmux session named `comfy` under bash.
-#   4. Launches Next.js (FrameForge) in a detached tmux session named `frame`
-#      under bash.
-#   5. Prints the URLs and tmux attach commands.
+#   2. Stabilizes the GPU for Thunderbolt operation:
+#      - Enables persistence mode (keeps driver loaded between CUDA calls)
+#      - Locks GPU clocks to 300 MHz (prevents power state transitions
+#        that crash the PCIe link over USB4/Thunderbolt — see
+#        NVIDIA/open-gpu-kernel-modules #979)
+#      - Sets power limit to minimum (150W) as safety net
+#   3. Kills any stale `comfy` or `frame` tmux sessions.
+#   4. Launches ComfyUI in a detached tmux session named `comfy` under bash.
+#   5. Launches Next.js (FrameForge) in a detached tmux session named `framenext`.
+#   6. Prints the URLs and tmux attach commands.
 #
 # IMPORTANT: both tmux sessions are wrapped in `bash -lc '...'` because the
 # default login shell on CachyOS is fish, and fish cannot source bash-syntax
-# files like `.venv/bin/activate` (fails with: 'case' builtin not inside of
-# switch block). Forcing bash for the subprocess fixes this cleanly.
+# files like `.venv/bin/activate`.
 #
-# Because both services run under `tmux new-session -d`, closing your SSH
-# terminal does NOT kill them.
+# GPU CLOCK NOTE: 300 MHz is very conservative and will be slow for inference.
+# Once stability is confirmed, raise with:
+#     sudo nvidia-smi -lgc 300,1500
+# If that's stable, try:
+#     sudo nvidia-smi -lgc 300,2100
+# The max boost clock for RTX PRO 4500 Blackwell is ~2100 MHz.
 #
-# Watch logs:     tmux attach -t comfy   (or -t frame)
+# Watch logs:     tmux attach -t comfy   (or -t framenext)
 # Detach:         Ctrl+B then d
 # Restart Ollama: sudo systemctl start ollama
 
@@ -38,15 +44,31 @@ set -e
 echo "→ Stopping Ollama to free GPU VRAM..."
 sudo systemctl stop ollama 2>/dev/null || true
 
+echo "→ Stabilizing GPU for Thunderbolt operation..."
+if nvidia-smi &>/dev/null; then
+    sudo nvidia-smi -pm 1
+    sudo nvidia-smi -lgc 300,300
+    sudo nvidia-smi -pl 150
+    echo "  ✓ Persistence mode ON, clocks locked at 300 MHz, power limit 150W"
+else
+    echo "  ✗ WARNING: nvidia-smi not responding — GPU may not be available"
+    echo "  Continuing anyway in case it recovers..."
+fi
+
 echo "→ Killing stale tmux sessions..."
 tmux kill-session -t comfy 2>/dev/null || true
+tmux kill-session -t framenext 2>/dev/null || true
+# Also kill legacy session name
 tmux kill-session -t frame 2>/dev/null || true
 
 echo "→ Starting ComfyUI in tmux (under bash)..."
 tmux new-session -d -s comfy "bash -lc 'cd /home/lynf/ComfyUI && source .venv/bin/activate && python main.py --listen 0.0.0.0 --port 8188; exec bash'"
 
+echo "→ Waiting for ComfyUI to start..."
+sleep 5
+
 echo "→ Starting FrameForge (Next.js) in tmux (under bash)..."
-tmux new-session -d -s frame "bash -lc 'cd /home/lynf/videostar && PORT=3060 npm run dev; exec bash'"
+tmux new-session -d -s framenext "bash -lc 'cd /home/lynf/videostar && PORT=3060 npm run dev; exec bash'"
 
 echo ""
 echo "✓ FrameForge stack started."
@@ -54,7 +76,11 @@ echo "  ComfyUI:    http://192.168.4.176:8188"
 echo "  FrameForge: http://192.168.4.176:3060"
 echo ""
 echo "  Watch ComfyUI:    tmux attach -t comfy"
-echo "  Watch Next.js:    tmux attach -t frame"
+echo "  Watch Next.js:    tmux attach -t framenext"
 echo "  Detach from tmux: Ctrl+B then d"
 echo "  Restart Ollama:   sudo systemctl start ollama"
+echo ""
+echo "  GPU clocks locked at 300 MHz for stability."
+echo "  To raise for faster inference (if stable):"
+echo "    sudo nvidia-smi -lgc 300,1500"
 echo ""
