@@ -1,16 +1,33 @@
 // FrameForge — ComfyUI Workflow JSON Builder
 // Constructs the LTX-Video 2.3 API-format workflow from user parameters
+//
+// Node graph (text-to-video):
+//   1:CheckpointLoaderSimple → 7:LoraLoaderModelOnly (optional)
+//   2:LTXAVTextEncoderLoader → 4:CLIPTextEncode(+) / 5:CLIPTextEncode(-)
+//   3:LTXVAudioVAELoader
+//   4+5 → 6:LTXVConditioning
+//   8:EmptyLTXVLatentVideo + 9:LTXVEmptyLatentAudio → 10:LTXVConcatAVLatent
+//   6 → 14:CFGGuider ← 7(model)
+//   10 → 15:SamplerCustomAdvanced ← 14(guider) + 13(sampler) + 12(sigmas) + 11(noise)
+//   15 → 16:LTXVSeparateAVLatent → 17:VAEDecode + 18:LTXVAudioVAEDecode
+//   17+18 → 19:VHS_VideoCombine
 
 import type { GenerateRequest } from "./types";
 import { durationToFrames } from "./models";
 
+// ---------------------------------------------------------------------------
+// Model file names — must match what is on disk in ComfyUI/models/
+// ---------------------------------------------------------------------------
+const CHECKPOINT = "ltx-2.3-22b-dev.safetensors";
+const GEMMA_ENCODER = "comfy_gemma_3_12B_it.safetensors";
+const DISTILLED_LORA = "ltxv/ltx2/ltx-2.3-22b-distilled-lora-384.safetensors";
+
 const NEGATIVE_PROMPT =
-  "blurry, low quality, still frame, frames, watermark, overlay, titles, has blurbox, has subtitles";
+  "pc game, console game, video game, cartoon, childish, ugly, blurry, low quality, watermark";
 
-const CHECKPOINT_NAME = "ltx-av-step-1751000_vocoder_24K.safetensors";
-const GEMMA_PATH =
-  "gemma-3-12b-it-qat-q4_0-unquantized_readout_proj/model/model.safetensors";
-
+// ---------------------------------------------------------------------------
+// Text → Video
+// ---------------------------------------------------------------------------
 export function buildTextToVideoWorkflow(req: GenerateRequest) {
   const frames = durationToFrames(req.duration, req.fps);
   const seed = req.seed ?? Math.floor(Math.random() * 2147483647);
@@ -18,31 +35,106 @@ export function buildTextToVideoWorkflow(req: GenerateRequest) {
 
   return {
     prompt: {
+      // ── Model loading ────────────────────────────────────────────────
+      // 1: Load the LTX-2.3 AV checkpoint (outputs MODEL, CLIP, VAE)
       "1": {
         class_type: "CheckpointLoaderSimple",
-        inputs: { ckpt_name: CHECKPOINT_NAME },
+        inputs: { ckpt_name: CHECKPOINT },
       },
+
+      // 2: Load Gemma 3 12B text encoder (outputs CLIP for text encoding)
+      //    text_encoder → file in models/text_encoders/
+      //    ckpt_name    → same AV checkpoint (needed for tokenizer config)
       "2": {
-        class_type: "LTXVGemmaCLIPModelLoader",
+        class_type: "LTXAVTextEncoderLoader",
         inputs: {
-          gemma_path: GEMMA_PATH,
-          ltxv_path: CHECKPOINT_NAME,
-          max_length: 1024,
+          text_encoder: GEMMA_ENCODER,
+          ckpt_name: CHECKPOINT,
+          device: "default",
         },
       },
+
+      // 3: Load audio VAE from the same checkpoint
       "3": {
+        class_type: "LTXVAudioVAELoader",
+        inputs: { ckpt_name: CHECKPOINT },
+      },
+
+      // ── Text encoding ────────────────────────────────────────────────
+      // 4: Positive prompt
+      "4": {
         class_type: "CLIPTextEncode",
         inputs: { text: req.prompt, clip: ["2", 0] },
       },
-      "4": {
+
+      // 5: Negative prompt
+      "5": {
         class_type: "CLIPTextEncode",
         inputs: { text: NEGATIVE_PROMPT, clip: ["2", 0] },
       },
-      "8": {
-        class_type: "KSamplerSelect",
-        inputs: { sampler_name: "euler" },
+
+      // 6: Wrap conditioning with frame rate for LTX-Video
+      "6": {
+        class_type: "LTXVConditioning",
+        inputs: {
+          frame_rate: req.fps,
+          positive: ["4", 0],
+          negative: ["5", 0],
+        },
       },
+
+      // ── LoRA (distilled for faster generation) ───────────────────────
+      // 7: Apply distilled LoRA to model (strength 0.5 for distilled mode)
+      "7": {
+        class_type: "LoraLoaderModelOnly",
+        inputs: {
+          model: ["1", 0],
+          lora_name: DISTILLED_LORA,
+          strength_model: 0.5,
+        },
+      },
+
+      // ── Latent creation ──────────────────────────────────────────────
+      // 8: Empty video latent at requested resolution
+      "8": {
+        class_type: "EmptyLTXVLatentVideo",
+        inputs: {
+          width: req.width,
+          height: req.height,
+          length: frames,
+          batch_size: 1,
+        },
+      },
+
+      // 9: Empty audio latent (matched to video duration)
       "9": {
+        class_type: "LTXVEmptyLatentAudio",
+        inputs: {
+          frames_number: frames,
+          frame_rate: fpsInt,
+          batch_size: 1,
+          audio_vae: ["3", 0],
+        },
+      },
+
+      // 10: Concatenate video + audio latents for the AV model
+      "10": {
+        class_type: "LTXVConcatAVLatent",
+        inputs: {
+          video_latent: ["8", 0],
+          audio_latent: ["9", 0],
+        },
+      },
+
+      // ── Sampling ─────────────────────────────────────────────────────
+      // 11: Random noise
+      "11": {
+        class_type: "RandomNoise",
+        inputs: { noise_seed: seed },
+      },
+
+      // 12: LTX-Video scheduler (generates sigma schedule)
+      "12": {
         class_type: "LTXVScheduler",
         inputs: {
           steps: 20,
@@ -50,26 +142,67 @@ export function buildTextToVideoWorkflow(req: GenerateRequest) {
           base_shift: 0.95,
           stretch: true,
           terminal: 0.1,
-          latent: ["28", 0],
+          latent: ["10", 0],
         },
       },
-      "11": {
-        class_type: "RandomNoise",
-        inputs: { noise_seed: seed },
-      },
-      "12": {
-        class_type: "VAEDecode",
-        inputs: { samples: ["29", 0], vae: ["1", 2] },
-      },
+
+      // 13: Sampler selection
       "13": {
-        class_type: "LTXVAudioVAELoader",
-        inputs: { ckpt_name: CHECKPOINT_NAME },
+        class_type: "KSamplerSelect",
+        inputs: { sampler_name: "euler" },
       },
+
+      // 14: CFG Guider — drives the denoising with positive/negative conditioning
       "14": {
-        class_type: "LTXVAudioVAEDecode",
-        inputs: { samples: ["29", 1], audio_vae: ["13", 0] },
+        class_type: "CFGGuider",
+        inputs: {
+          cfg: 3,
+          model: ["7", 0],
+          positive: ["6", 0],
+          negative: ["6", 1],
+        },
       },
+
+      // 15: Run the sampler
       "15": {
+        class_type: "SamplerCustomAdvanced",
+        inputs: {
+          noise: ["11", 0],
+          guider: ["14", 0],
+          sampler: ["13", 0],
+          sigmas: ["12", 0],
+          latent_image: ["10", 0],
+        },
+      },
+
+      // ── Decode ───────────────────────────────────────────────────────
+      // 16: Separate the AV latent back into video + audio
+      "16": {
+        class_type: "LTXVSeparateAVLatent",
+        inputs: { av_latent: ["15", 0] },
+      },
+
+      // 17: Decode video latent → images
+      "17": {
+        class_type: "VAEDecode",
+        inputs: {
+          samples: ["16", 0],
+          vae: ["1", 2],
+        },
+      },
+
+      // 18: Decode audio latent → audio
+      "18": {
+        class_type: "LTXVAudioVAEDecode",
+        inputs: {
+          samples: ["16", 1],
+          audio_vae: ["3", 0],
+        },
+      },
+
+      // ── Output ───────────────────────────────────────────────────────
+      // 19: Combine into final MP4
+      "19": {
         class_type: "VHS_VideoCombine",
         inputs: {
           frame_rate: req.fps,
@@ -82,86 +215,8 @@ export function buildTextToVideoWorkflow(req: GenerateRequest) {
           trim_to_audio: false,
           pingpong: false,
           save_output: true,
-          images: ["12", 0],
-          audio: ["14", 0],
-        },
-      },
-      "17": {
-        class_type: "MultimodalGuider",
-        inputs: {
-          skip_blocks: "29",
-          model: ["28", 1],
-          positive: ["22", 0],
-          negative: ["22", 1],
-          parameters: ["18", 0],
-        },
-      },
-      "18": {
-        class_type: "GuiderParameters",
-        inputs: {
-          modality: "VIDEO",
-          cfg: 3,
-          stg: 0,
-          rescale: 0,
-          modality_scale: 3,
-          parameters: ["19", 0],
-        },
-      },
-      "19": {
-        class_type: "GuiderParameters",
-        inputs: {
-          modality: "AUDIO",
-          cfg: 7,
-          stg: 0,
-          rescale: 0,
-          modality_scale: 3,
-        },
-      },
-      "22": {
-        class_type: "LTXVConditioning",
-        inputs: {
-          frame_rate: req.fps,
-          positive: ["3", 0],
-          negative: ["4", 0],
-        },
-      },
-      "26": {
-        class_type: "LTXVEmptyLatentAudio",
-        inputs: {
-          frames_number: frames,
-          frame_rate: fpsInt,
-          batch_size: 1,
-        },
-      },
-      "28": {
-        class_type: "LTXVConcatAVLatent",
-        inputs: {
-          video_latent: ["43", 0],
-          audio_latent: ["26", 0],
-          model: ["1", 0],
-        },
-      },
-      "29": {
-        class_type: "LTXVSeparateAVLatent",
-        inputs: { av_latent: ["41", 0], model: ["28", 1] },
-      },
-      "41": {
-        class_type: "SamplerCustomAdvanced",
-        inputs: {
-          noise: ["11", 0],
-          guider: ["17", 0],
-          sampler: ["8", 0],
-          sigmas: ["9", 0],
-          latent_image: ["28", 0],
-        },
-      },
-      "43": {
-        class_type: "EmptyLTXVLatentVideo",
-        inputs: {
-          width: req.width,
-          height: req.height,
-          length: frames,
-          batch_size: 1,
+          images: ["17", 0],
+          audio: ["18", 0],
         },
       },
     },
@@ -169,38 +224,46 @@ export function buildTextToVideoWorkflow(req: GenerateRequest) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Image → Video
+// ---------------------------------------------------------------------------
 export function buildImageToVideoWorkflow(
   req: GenerateRequest & { sourceImage: string }
 ) {
-  // Start from the text-to-video workflow and add image conditioning
   const base = buildTextToVideoWorkflow(req);
-  const workflow = base.prompt;
+  const workflow = base.prompt as Record<string, Record<string, unknown>>;
+  const frames = durationToFrames(req.duration, req.fps);
 
-  // Add LoadImage node
-  (workflow as Record<string, unknown>)["50"] = {
+  // 50: Load the source image
+  workflow["50"] = {
     class_type: "LoadImage",
     inputs: { image: req.sourceImage, upload: "image" },
   };
 
-  // Add LTXVImgToVideo conditioning node
-  const frames = durationToFrames(req.duration, req.fps);
-  (workflow as Record<string, unknown>)["51"] = {
-    class_type: "LTXVImgToVideoLatent",
+  // 51: Preprocess image for LTX-Video (resize to correct aspect)
+  workflow["51"] = {
+    class_type: "LTXVPreprocess",
     inputs: {
       image: ["50", 0],
-      vae: ["1", 2],
-      width: req.width,
-      height: req.height,
-      length: frames,
-      batch_size: 1,
+      target_tokens: 18,
     },
   };
 
-  // Replace the empty latent with image-conditioned latent
-  (
-    (workflow as Record<string, Record<string, unknown>>)["28"]
-      .inputs as Record<string, unknown>
-  ).video_latent = ["51", 0];
+  // 52: Condition the video latent on the source image
+  //     bypass=false means we ARE using the image (I2V mode)
+  workflow["52"] = {
+    class_type: "LTXVImgToVideoConditionOnly",
+    inputs: {
+      strength: 0.7,
+      bypass: false,
+      vae: ["1", 2],
+      image: ["51", 0],
+      latent: ["8", 0],
+    },
+  };
+
+  // Re-route: ConcatAVLatent now takes image-conditioned latent instead of empty
+  (workflow["10"].inputs as Record<string, unknown>).video_latent = ["52", 0];
 
   return base;
 }
