@@ -138,7 +138,7 @@ export function buildTextToVideoWorkflow(req: GenerateRequest) {
         inputs: {
           video_latent: ["43", 0],
           audio_latent: ["26", 0],
-          model: ["44", 0],
+          model: ["1", 0],
         },
       },
       "29": {
@@ -162,14 +162,6 @@ export function buildTextToVideoWorkflow(req: GenerateRequest) {
           height: req.height,
           length: frames,
           batch_size: 1,
-        },
-      },
-      "44": {
-        class_type: "LTXVSequenceParallelMultiGPUPatcher",
-        inputs: {
-          torch_compile: true,
-          disable_backup: false,
-          model: ["1", 0],
         },
       },
     },
@@ -205,7 +197,6 @@ export function buildImageToVideoWorkflow(
   };
 
   // Replace the empty latent with image-conditioned latent
-  // Point node 43 replacement: node 28's video_latent from node 51 instead of 43
   (
     (workflow as Record<string, Record<string, unknown>>)["28"]
       .inputs as Record<string, unknown>
