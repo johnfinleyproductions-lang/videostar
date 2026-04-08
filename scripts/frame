@@ -9,31 +9,36 @@
 #     sudo install -m 755 scripts/frame /usr/local/bin/frame
 #
 # Run:
-#     frame          # default 300 MHz (safest)
-#     frame 450      # lock at 450 MHz (1.5x faster)
-#     frame 600      # lock at 600 MHz (2x faster)
-#     frame 900      # lock at 900 MHz (3x faster, may crash)
+#     frame          # default 1933 MHz (OCuLink)
+#     frame 700      # lock at 700 MHz (USB4/Thunderbolt safe max)
+#     frame 2000     # lock at 2000 MHz (push it)
 #
 # What it does:
 #   1. Stops Ollama to release any VRAM it's holding on the NVIDIA card.
-#   2. Stabilizes the GPU for Thunderbolt operation:
+#   2. Stabilizes the GPU:
 #      - Enables persistence mode (keeps driver loaded between CUDA calls)
-#      - Locks GPU clocks to a FIXED speed (prevents power state transitions
-#        that crash the PCIe link over USB4/Thunderbolt — see
+#      - Locks GPU clocks to a FIXED speed (min=max, prevents power state
+#        transitions that crash the PCIe link over USB4/Thunderbolt — see
 #        NVIDIA/open-gpu-kernel-modules #979)
-#      - Sets power limit to minimum (150W) as safety net
+#      - Sets power limit to 186W (safe headroom below 200W TDP)
 #   3. Kills any stale tmux sessions.
 #   4. Launches ComfyUI in a detached tmux session named `comfy` under bash.
 #   5. Launches Next.js (FrameForge) in a detached tmux session named `framenext`.
 #   6. Prints the URLs and tmux attach commands.
 #
 # IMPORTANT: Clock speed MUST be set BEFORE any CUDA workload starts.
-# Changing clocks mid-inference will crash the USB4 link.
+# Changing clocks mid-inference will crash the system (especially over USB4).
 # That's why this script sets clocks first, then starts ComfyUI.
 #
 # IMPORTANT: both tmux sessions are wrapped in `bash -lc '...'` because the
 # default login shell on CachyOS is fish, and fish cannot source bash-syntax
 # files like `.venv/bin/activate`.
+#
+# CONNECTION NOTES:
+#   OCuLink (direct PCIe): Stable at 1933+ MHz, 186W. Default config.
+#   USB4/Thunderbolt:      Max stable ~700 MHz. PCIe tunnel renegotiation
+#                          causes hard-locks at higher clocks or with
+#                          clock ranges. Use `frame 700` if on USB4.
 #
 # Watch logs:     tmux attach -t comfy   (or -t framenext)
 # Detach:         Ctrl+B then d
@@ -41,18 +46,19 @@
 
 set -e
 
-# Accept optional clock speed argument (default: 300 MHz)
-GPU_CLOCK="${1:-300}"
+# Default clock speed: 1933 MHz (OCuLink safe default)
+GPU_CLOCK="${1:-1933}"
+POWER_LIMIT=186
 
 echo "→ Stopping Ollama to free GPU VRAM..."
 sudo systemctl stop ollama 2>/dev/null || true
 
-echo "→ Stabilizing GPU for Thunderbolt operation..."
+echo "→ Stabilizing GPU..."
 if nvidia-smi &>/dev/null; then
     sudo nvidia-smi -pm 1
     sudo nvidia-smi -lgc "${GPU_CLOCK},${GPU_CLOCK}"
-    sudo nvidia-smi -pl 150
-    echo "  ✓ Persistence mode ON, clocks locked at ${GPU_CLOCK} MHz, power limit 150W"
+    sudo nvidia-smi -pl "$POWER_LIMIT"
+    echo "  ✓ Persistence mode ON, clocks locked at ${GPU_CLOCK} MHz, power limit ${POWER_LIMIT}W"
 else
     echo "  ✗ WARNING: nvidia-smi not responding — GPU may not be available"
     echo "  Continuing anyway in case it recovers..."
@@ -83,10 +89,5 @@ echo "  Watch Next.js:    tmux attach -t framenext"
 echo "  Detach from tmux: Ctrl+B then d"
 echo "  Restart Ollama:   sudo systemctl start ollama"
 echo ""
-echo "  GPU clocks locked at ${GPU_CLOCK} MHz."
-if [ "$GPU_CLOCK" -eq 300 ] 2>/dev/null; then
-    echo "  To try faster (set BEFORE generating, not during):"
-    echo "    frame 450    # 1.5x speed"
-    echo "    frame 600    # 2x speed"
-fi
+echo "  GPU clocks locked at ${GPU_CLOCK} MHz, power limit ${POWER_LIMIT}W."
 echo ""
