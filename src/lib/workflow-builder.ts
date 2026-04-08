@@ -245,11 +245,13 @@ export function buildImageToVideoWorkflow(
   };
 
   // 51: Preprocess image for LTX-Video (resize to correct aspect)
+  //     img_compression: JPEG quality for preprocessing (0-100, 65 = good balance)
   workflow["51"] = {
     class_type: "LTXVPreprocess",
     inputs: {
       image: ["50", 0],
       target_tokens: 18,
+      img_compression: 65,
     },
   };
 
