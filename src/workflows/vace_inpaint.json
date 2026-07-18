@@ -1,0 +1,326 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "wan2.2_fun_vace_high_noise_14B_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "MODEL_HIGH"
+    }
+  },
+  "2": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "wan2.2_fun_vace_low_noise_14B_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "MODEL_LOW"
+    }
+  },
+  "3": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan"
+    },
+    "_meta": {
+      "title": "CLIP"
+    }
+  },
+  "4": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    },
+    "_meta": {
+      "title": "VAE"
+    }
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "",
+      "clip": [
+        "3",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "FF Positive"
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "\u8272\u8c03\u8273\u4e3d\uff0c\u8fc7\u66dd\uff0c\u9759\u6001\uff0c\u7ec6\u8282\u6a21\u7cca\u4e0d\u6e05\uff0c\u5b57\u5e55\uff0c\u98ce\u683c\uff0c\u4f5c\u54c1\uff0c\u753b\u4f5c\uff0c\u753b\u9762\uff0c\u9759\u6b62\uff0c\u6574\u4f53\u53d1\u7070\uff0c\u6700\u5dee\u8d28\u91cf\uff0c\u4f4e\u8d28\u91cf\uff0cJPEG\u538b\u7f29\u6b8b\u7559\uff0c\u4e11\u964b\u7684\uff0c\u6b8b\u7f3a\u7684\uff0c\u591a\u4f59\u7684\u624b\u6307\uff0c\u753b\u5f97\u4e0d\u597d\u7684\u624b\u90e8\uff0c\u753b\u5f97\u4e0d\u597d\u7684\u8138\u90e8\uff0c\u7578\u5f62\u7684\uff0c\u6bc1\u5bb9\u7684\uff0c\u5f62\u6001\u7578\u5f62\u7684\u80a2\u4f53\uff0c\u624b\u6307\u878d\u5408\uff0c\u9759\u6b62\u4e0d\u52a8\u7684\u753b\u9762\uff0c\u6742\u4e71\u7684\u80cc\u666f\uff0c\u4e09\u6761\u817f\uff0c\u80cc\u666f\u4eba\u5f88\u591a\uff0c\u5012\u7740\u8d70",
+      "clip": [
+        "3",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "FF Negative"
+    }
+  },
+  "9": {
+    "class_type": "WanVaceToVideo",
+    "inputs": {
+      "positive": [
+        "5",
+        0
+      ],
+      "negative": [
+        "6",
+        0
+      ],
+      "vae": [
+        "4",
+        0
+      ],
+      "width": 1280,
+      "height": 720,
+      "length": 81,
+      "batch_size": 1,
+      "strength": 1.0,
+      "control_video": [
+        "7",
+        0
+      ],
+      "control_masks": [
+        "12",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "FF Wan Video",
+      "note": "Footage editing: control_video (the clip) + control_masks (white=regenerate). WanVaceToVideo upscales both to width/height internally and pads/truncates to length; no reference_image in v1 (trim_latent is 0, TRIM is a no-op kept for graph parity)."
+    }
+  },
+  "10": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+      "model": [
+        "18",
+        0
+      ],
+      "shift": 8
+    },
+    "_meta": {
+      "title": "SHIFT_HIGH"
+    }
+  },
+  "11": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+      "model": [
+        "19",
+        0
+      ],
+      "shift": 8
+    },
+    "_meta": {
+      "title": "SHIFT_LOW"
+    }
+  },
+  "13": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+      "model": [
+        "10",
+        0
+      ],
+      "add_noise": "enable",
+      "noise_seed": 0,
+      "steps": 20,
+      "cfg": 3.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "positive": [
+        "9",
+        0
+      ],
+      "negative": [
+        "9",
+        1
+      ],
+      "latent_image": [
+        "9",
+        2
+      ],
+      "start_at_step": 0,
+      "end_at_step": 10,
+      "return_with_leftover_noise": "enable"
+    },
+    "_meta": {
+      "title": "FF Sampler S1",
+      "aliases": [
+        "FF Seed"
+      ]
+    }
+  },
+  "14": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+      "model": [
+        "11",
+        0
+      ],
+      "add_noise": "disable",
+      "noise_seed": 0,
+      "steps": 20,
+      "cfg": 3.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "positive": [
+        "9",
+        0
+      ],
+      "negative": [
+        "9",
+        1
+      ],
+      "latent_image": [
+        "13",
+        0
+      ],
+      "start_at_step": 10,
+      "end_at_step": 10000,
+      "return_with_leftover_noise": "disable"
+    },
+    "_meta": {
+      "title": "FF Sampler S2"
+    }
+  },
+  "15": {
+    "class_type": "TrimVideoLatent",
+    "inputs": {
+      "samples": [
+        "14",
+        0
+      ],
+      "trim_amount": [
+        "9",
+        3
+      ]
+    },
+    "_meta": {
+      "title": "TRIM",
+      "note": "Removes the prepended reference latent frame(s); trim_amount is wired from WanVaceToVideo's trim_latent output."
+    }
+  },
+  "16": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "15",
+        0
+      ],
+      "vae": [
+        "4",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "DECODE"
+    }
+  },
+  "17": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+      "images": [
+        "16",
+        0
+      ],
+      "frame_rate": 16,
+      "loop_count": 0,
+      "filename_prefix": "video/wan-vace/edit",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 10,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true
+    },
+    "_meta": {
+      "title": "FF Output"
+    }
+  },
+  "7": {
+    "class_type": "VHS_LoadVideo",
+    "inputs": {
+      "video": "example.mp4",
+      "force_rate": 16,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 81,
+      "skip_first_frames": 0,
+      "select_every_nth": 1,
+      "format": "None"
+    },
+    "_meta": {
+      "title": "FF Control Video",
+      "note": "The footage to edit. force_rate 16 resamples any input fps to Wan native 16 (wall-clock duration preserved); frame_load_cap is patched to the job length. Accepts input-dir refs (jobs/<id>/clip.mp4) and annotated '<subfolder>/<file> [output]' paths for editing our own renders."
+    }
+  },
+  "8": {
+    "class_type": "VHS_LoadVideo",
+    "inputs": {
+      "video": "example_mask.mp4",
+      "force_rate": 16,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 81,
+      "skip_first_frames": 0,
+      "select_every_nth": 1,
+      "format": "None"
+    },
+    "_meta": {
+      "title": "FF Control Mask",
+      "note": "WHITE = regenerate, BLACK = keep. buildVaceInpaint swaps this node to LoadImage + RepeatImageBatch when the mask is a still image."
+    }
+  },
+  "12": {
+    "class_type": "ImageToMask",
+    "inputs": {
+      "image": [
+        "8",
+        0
+      ],
+      "channel": "red"
+    },
+    "_meta": {
+      "title": "MASK_CONVERT"
+    }
+  },
+  "18": {
+    "class_type": "PathchSageAttentionKJ",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "sage_attention": "auto"
+    },
+    "_meta": {
+      "title": "Sage 0",
+      "note": "SageAttention 1.0.6 triton auto; revert: *.pre-sage.json"
+    }
+  },
+  "19": {
+    "class_type": "PathchSageAttentionKJ",
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ],
+      "sage_attention": "auto"
+    },
+    "_meta": {
+      "title": "Sage 1",
+      "note": "SageAttention 1.0.6 triton auto; revert: *.pre-sage.json"
+    }
+  }
+}

@@ -1,9 +1,13 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
-import { v4 as uuidv4 } from "uuid";
 import { toast } from "sonner";
-import { LTX_VIDEO_MODEL } from "@/lib/models";
+import {
+  DEFAULT_VIDEO_MODEL_ID,
+  LTX_VIDEO_MODEL,
+  getVideoModelProfile,
+  type VideoModelId,
+} from "@/lib/models";
 import type {
   VideoGenerationItem,
   VideoGenerationStatus,
@@ -12,6 +16,31 @@ import type {
 
 const MAX_CONCURRENT = 1; // LTX-Video needs full VRAM
 const POLL_INTERVAL = 3000;
+const ESTIMATED_PROGRESS_INTERVAL = 1000;
+const MAX_ESTIMATED_PROGRESS = 92;
+
+function createLocalGenerationId() {
+  return `local-${crypto.randomUUID?.() ?? Date.now().toString(36)}`;
+}
+
+function estimateGenerationMs(input: {
+  width: number;
+  height: number;
+  duration: number;
+  model: VideoModelId;
+}) {
+  const pixels = input.width * input.height;
+  const sizeFactor = Math.max(1, pixels / (960 * 544));
+  const modelProfile = getVideoModelProfile(input.model);
+  const modelFactor =
+    modelProfile.backend === "ltx-desktop"
+      ? modelProfile.ltxDesktopRuntimeMode === "streaming_models_loading"
+        ? 1.35
+        : 1.15
+      : 1;
+  const estimatedSeconds = input.duration * 22 * sizeFactor * modelFactor;
+  return Math.max(75_000, Math.min(20 * 60_000, estimatedSeconds * 1000));
+}
 
 export function useVideoStudio() {
   const [prompt, setPrompt] = useState("");
@@ -20,10 +49,14 @@ export function useVideoStudio() {
   );
   const [duration, setDuration] = useState(4);
   const [fps, setFps] = useState(LTX_VIDEO_MODEL.defaultParams.fps);
+  const [selectedModel, setSelectedModel] = useState<VideoModelId>(
+    DEFAULT_VIDEO_MODEL_ID
+  );
   const [sourceImage, setSourceImage] = useState<File | null>(null);
   const [queue, setQueue] = useState<VideoGenerationItem[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const pollingRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const estimatedProgressRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const eventSourceRef = useRef<EventSource | null>(null);
 
   const activeCount = queue.filter(
@@ -38,6 +71,32 @@ export function useVideoStudio() {
       );
     },
     []
+  );
+
+  const stopEstimatedProgress = useCallback((id: string) => {
+    const timer = estimatedProgressRef.current.get(id);
+    if (timer) {
+      clearInterval(timer);
+      estimatedProgressRef.current.delete(id);
+    }
+  }, []);
+
+  const startEstimatedProgress = useCallback(
+    (id: string, estimatedMs: number) => {
+      stopEstimatedProgress(id);
+      const startedAt = Date.now();
+      const timer = setInterval(() => {
+        const elapsed = Date.now() - startedAt;
+        const eased = 1 - Math.exp(-elapsed / (estimatedMs * 0.55));
+        const progress = Math.min(
+          MAX_ESTIMATED_PROGRESS,
+          Math.round(4 + eased * (MAX_ESTIMATED_PROGRESS - 4))
+        );
+        updateQueueItem(id, { progress });
+      }, ESTIMATED_PROGRESS_INTERVAL);
+      estimatedProgressRef.current.set(id, timer);
+    },
+    [stopEstimatedProgress, updateQueueItem]
   );
 
   // Poll for status
@@ -148,12 +207,46 @@ export function useVideoStudio() {
     setIsGenerating(true);
     toast.info("Queuing generation...");
 
+    const generationPrompt = prompt.trim();
+    const generationSourceImage = sourceImage;
+    const modelProfile = getVideoModelProfile(selectedModel);
+    const localId = createLocalGenerationId();
+    const createdAt = new Date().toISOString();
+    const optimisticItem: VideoGenerationItem = {
+      id: localId,
+      status: "processing",
+      prompt: generationPrompt,
+      width: selectedResolution.width,
+      height: selectedResolution.height,
+      fps,
+      frames: fps * duration + 1,
+      duration,
+      resolution: selectedResolution.label,
+      model: selectedModel,
+      modelName: modelProfile.name,
+      createdAt,
+      progress: 3,
+      sourceImageUrl: generationSourceImage?.name,
+    };
+
+    setQueue((prev) => [optimisticItem, ...prev]);
+    startEstimatedProgress(
+      localId,
+      estimateGenerationMs({
+        width: selectedResolution.width,
+        height: selectedResolution.height,
+        duration,
+        model: selectedModel,
+      })
+    );
+
     try {
       // Upload source image if present
       let uploadedImageName: string | undefined;
-      if (sourceImage) {
+      if (generationSourceImage) {
+        updateQueueItem(localId, { progress: 5 });
         const formData = new FormData();
-        formData.append("image", sourceImage);
+        formData.append("image", generationSourceImage);
 
         const uploadRes = await fetch("/api/upload", {
           method: "POST",
@@ -163,9 +256,14 @@ export function useVideoStudio() {
         if (uploadRes.ok) {
           const uploadData = await uploadRes.json();
           uploadedImageName = uploadData.filename;
+          updateQueueItem(localId, {
+            progress: 8,
+            sourceImageUrl: uploadedImageName,
+          });
         }
       }
 
+      updateQueueItem(localId, { progress: uploadedImageName ? 10 : 6 });
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -175,6 +273,7 @@ export function useVideoStudio() {
           height: selectedResolution.height,
           fps,
           duration,
+          model: selectedModel,
           sourceImage: uploadedImageName,
         }),
       });
@@ -185,25 +284,22 @@ export function useVideoStudio() {
       }
 
       const data = await res.json();
-
-      // Add to queue
-      const item: VideoGenerationItem = {
-        id: data.id,
-        status: "processing",
-        prompt: prompt.trim(),
-        comfyPromptId: data.comfyPromptId,
-        width: selectedResolution.width,
-        height: selectedResolution.height,
-        fps,
-        frames: fps * duration + 1,
-        duration,
-        resolution: selectedResolution.label,
-        createdAt: new Date().toISOString(),
-        progress: 0,
-        sourceImageUrl: uploadedImageName,
-      };
-
-      setQueue((prev) => [item, ...prev]);
+      stopEstimatedProgress(localId);
+      setQueue((prev) =>
+        prev.map((item) =>
+          item.id === localId
+            ? {
+                ...item,
+                id: data.id,
+                status:
+                  data.status === "completed" ? "completed" : "processing",
+                comfyPromptId: data.comfyPromptId,
+                progress: data.status === "completed" ? 100 : item.progress,
+                sourceImageUrl: uploadedImageName,
+              }
+            : item
+        )
+      );
       setPrompt("");
       setSourceImage(null);
 
@@ -213,20 +309,29 @@ export function useVideoStudio() {
       }
       startPolling(data.id);
     } catch (error) {
+      stopEstimatedProgress(localId);
       console.error("Generate error:", error);
       const message = error instanceof Error ? error.message : "Generation failed";
+      updateQueueItem(localId, {
+        status: "failed",
+        error: message,
+      });
       toast.error(message);
       setIsGenerating(false);
     }
   }, [
     prompt,
     selectedResolution,
+    selectedModel,
     fps,
     duration,
     sourceImage,
     activeCount,
     startPolling,
     connectProgress,
+    startEstimatedProgress,
+    stopEstimatedProgress,
+    updateQueueItem,
   ]);
 
   // Remove from queue
@@ -238,14 +343,18 @@ export function useVideoStudio() {
         clearInterval(timer);
         pollingRef.current.delete(id);
       }
+      stopEstimatedProgress(id);
     },
-    []
+    [stopEstimatedProgress]
   );
 
   // Cleanup on unmount
   useEffect(() => {
+    const polling = pollingRef.current;
+    const estimatedProgress = estimatedProgressRef.current;
     return () => {
-      pollingRef.current.forEach((timer) => clearInterval(timer));
+      polling.forEach((timer) => clearInterval(timer));
+      estimatedProgress.forEach((timer) => clearInterval(timer));
       eventSourceRef.current?.close();
     };
   }, []);
@@ -260,6 +369,8 @@ export function useVideoStudio() {
     setDuration,
     fps,
     setFps,
+    selectedModel,
+    setSelectedModel,
     sourceImage,
     setSourceImage,
     queue,

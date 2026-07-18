@@ -1,0 +1,400 @@
+// FrameForge — Image Workflow Builder
+// Builds ComfyUI API-format workflow JSON for local image generation.
+
+type FluxModel =
+  | "gguf"
+  | "flux2-fast"
+  | "q5"
+  | "flux2-hq"
+  | "fp8"
+  | "flux2-klein-true-v2";
+type ZImageProfile =
+  | "z-image-base-amateur-photo-8step"
+  | "z-image-turbo-amateur-photo";
+type ImageModel = FluxModel | ZImageProfile | string;
+
+const FLUX_ENCODER = "mistral_3_small_flux2_fp8.safetensors";
+const FLUX_KLEIN_ENCODER = "qwen_3_8b_fp8mixed.safetensors";
+const FLUX_VAE = "flux2-vae.safetensors";
+
+const MODEL_CONFIG: Record<
+  FluxModel,
+  {
+    file: string;
+    loaderClass: string;
+    fileKey: string;
+    clipName?: string;
+    filenamePrefix?: string;
+  }
+> = {
+  gguf: {
+    file: "flux2-dev-Q3_K_M.gguf",
+    loaderClass: "UnetLoaderGGUF",
+    fileKey: "unet_name",
+  },
+  "flux2-fast": {
+    file: "flux2-dev-Q3_K_M.gguf",
+    loaderClass: "UnetLoaderGGUF",
+    fileKey: "unet_name",
+  },
+  q5: {
+    file: "flux2-dev-Q5_K_M.gguf",
+    loaderClass: "UnetLoaderGGUF",
+    fileKey: "unet_name",
+  },
+  "flux2-hq": {
+    file: "flux2-dev-Q5_K_M.gguf",
+    loaderClass: "UnetLoaderGGUF",
+    fileKey: "unet_name",
+  },
+  fp8: {
+    file: "flux2_dev_fp8mixed.safetensors",
+    loaderClass: "UNETLoader",
+    fileKey: "unet_name",
+  },
+  "flux2-klein-true-v2": {
+    file: "Flux2-Klein-9B-True-v2-Q4_K.gguf",
+    loaderClass: "UnetLoaderGGUF",
+    fileKey: "unet_name",
+    clipName: FLUX_KLEIN_ENCODER,
+    filenamePrefix: "FrameForge_Flux2_Klein_True_V2",
+  },
+};
+
+const Z_IMAGE_TEXT_ENCODER = "qwen_3_4b_fp4_mixed.safetensors";
+const Z_IMAGE_VAE = "ae.safetensors";
+const Z_IMAGE_AMATEUR_PHOTO_LORA =
+  "z-image/deedee_amateur_photography_zimage_base_and_turbo_v1.safetensors";
+const Z_IMAGE_DISTILL_8STEP_LORA =
+  "z-image/Z-Image-Fun-Lora-Distill-8-Steps-2603-ComfyUI.safetensors";
+
+const Z_IMAGE_CONFIG: Record<
+  ZImageProfile,
+  {
+    diffusionModel: string;
+    loras: Array<{
+      name: string;
+      strengthModel: number;
+      strengthClip: number;
+    }>;
+    steps: number;
+    cfg: number;
+    filenamePrefix: string;
+  }
+> = {
+  "z-image-base-amateur-photo-8step": {
+    diffusionModel: "z_image_bf16.safetensors",
+    loras: [
+      {
+        name: Z_IMAGE_DISTILL_8STEP_LORA,
+        strengthModel: 0.85,
+        strengthClip: 0.85,
+      },
+      {
+        name: Z_IMAGE_AMATEUR_PHOTO_LORA,
+        strengthModel: 0.85,
+        strengthClip: 0.85,
+      },
+    ],
+    steps: 8,
+    cfg: 1.0,
+    filenamePrefix: "FrameForge_ZImage_Amateur_Base",
+  },
+  "z-image-turbo-amateur-photo": {
+    diffusionModel: "z_image_turbo_nvfp4.safetensors",
+    loras: [
+      {
+        name: Z_IMAGE_AMATEUR_PHOTO_LORA,
+        strengthModel: 0.85,
+        strengthClip: 0.85,
+      },
+    ],
+    steps: 8,
+    cfg: 1.0,
+    filenamePrefix: "FrameForge_ZImage_Amateur_Turbo",
+  },
+};
+
+export interface FluxWorkflowParams {
+  prompt: string;
+  negativePrompt?: string;
+  width?: number;
+  height?: number;
+  steps?: number;
+  cfg?: number;
+  seed?: number;
+  referenceImage?: string;
+  denoise?: number;
+  model?: ImageModel;
+}
+
+function clampDimension(value: number | undefined, fallback: number): number {
+  const resolved = value ?? fallback;
+  return Math.min(2048, Math.max(256, Math.round(resolved / 32) * 32));
+}
+
+export function buildFluxWorkflow(
+  params: FluxWorkflowParams,
+): Record<string, unknown> {
+  if (isZImageProfile(params.model)) {
+    return buildZImageWorkflow(params, params.model);
+  }
+
+  const {
+    prompt,
+    negativePrompt = "",
+    steps = 28,
+    cfg = 1.0,
+    seed = Math.floor(Math.random() * 1_000_000_000_000),
+    referenceImage,
+    denoise,
+    model = "gguf",
+  } = params;
+  const width = clampDimension(params.width, 1024);
+  const height = clampDimension(params.height, 1024);
+
+  const fluxModel = isFluxModel(model) ? model : "gguf";
+  const config = MODEL_CONFIG[fluxModel] ?? MODEL_CONFIG.gguf;
+  const unetLoaderInputs: Record<string, unknown> = {
+    [config.fileKey]: config.file,
+  };
+  if (fluxModel === "fp8") {
+    unetLoaderInputs.weight_dtype = "default";
+  }
+
+  const workflow: Record<string, unknown> = {
+    "1": {
+      class_type: config.loaderClass,
+      inputs: unetLoaderInputs,
+    },
+    "2": {
+      class_type: "CLIPLoader",
+      inputs: {
+        clip_name: config.clipName ?? FLUX_ENCODER,
+        type: "flux2",
+        device: "cpu",
+      },
+    },
+    "3": {
+      class_type: "VAELoader",
+      inputs: {
+        vae_name: FLUX_VAE,
+      },
+    },
+    "4": {
+      class_type: "CLIPTextEncode",
+      inputs: {
+        text: prompt,
+        clip: ["2", 0],
+      },
+    },
+    "5": {
+      class_type: "CLIPTextEncode",
+      inputs: {
+        text: negativePrompt,
+        clip: ["2", 0],
+      },
+    },
+    "7": {
+      class_type: "KSampler",
+      inputs: {
+        model: ["1", 0],
+        positive: ["4", 0],
+        negative: ["5", 0],
+        latent_image: ["6", 0],
+        seed,
+        steps,
+        cfg,
+        sampler_name: "euler",
+        scheduler: "simple",
+        denoise: referenceImage ? (denoise ?? 0.75) : 1.0,
+      },
+    },
+    "8": {
+      class_type: "VAEDecode",
+      inputs: {
+        samples: ["7", 0],
+        vae: ["3", 0],
+      },
+    },
+    "9": {
+      class_type: "SaveImage",
+      inputs: {
+        images: ["8", 0],
+        filename_prefix: config.filenamePrefix ?? "FrameForge_Flux2",
+      },
+    },
+  };
+
+  if (referenceImage) {
+    workflow["10"] = {
+      class_type: "LoadImage",
+      inputs: {
+        image: referenceImage,
+      },
+    };
+    workflow["6"] = {
+      class_type: "ImageScale",
+      inputs: {
+        image: ["10", 0],
+        upscale_method: "lanczos",
+        width,
+        height,
+        crop: "center",
+      },
+    };
+    workflow["12"] = {
+      class_type: "VAEEncode",
+      inputs: {
+        pixels: ["6", 0],
+        vae: ["3", 0],
+      },
+    };
+    (workflow["7"] as { inputs: Record<string, unknown> }).inputs.latent_image = [
+      "12",
+      0,
+    ];
+  } else {
+    workflow["6"] = {
+      class_type: "EmptyLatentImage",
+      inputs: {
+        width,
+        height,
+        batch_size: 1,
+      },
+    };
+  }
+
+  return workflow;
+}
+
+function isFluxModel(model: ImageModel | undefined): model is FluxModel {
+  return (
+    model === "gguf" ||
+    model === "flux2-fast" ||
+    model === "q5" ||
+    model === "flux2-hq" ||
+    model === "fp8" ||
+    model === "flux2-klein-true-v2"
+  );
+}
+
+function isZImageProfile(model: ImageModel | undefined): model is ZImageProfile {
+  return (
+    model === "z-image-base-amateur-photo-8step" ||
+    model === "z-image-turbo-amateur-photo"
+  );
+}
+
+function buildZImageWorkflow(
+  params: FluxWorkflowParams,
+  profileId: ZImageProfile,
+): Record<string, unknown> {
+  const profile = Z_IMAGE_CONFIG[profileId];
+  const {
+    prompt,
+    negativePrompt = "",
+    seed = Math.floor(Math.random() * 1_000_000_000_000),
+  } = params;
+  const width = clampDimension(params.width, 1024);
+  const height = clampDimension(params.height, 1024);
+  const steps = params.steps ?? profile.steps;
+  const cfg = params.cfg ?? profile.cfg;
+
+  const workflow: Record<string, { class_type: string; inputs: Record<string, unknown> }> = {
+    "1": {
+      class_type: "UNETLoader",
+      inputs: {
+        unet_name: profile.diffusionModel,
+        weight_dtype: "default",
+      },
+    },
+    "2": {
+      class_type: "CLIPLoader",
+      inputs: {
+        clip_name: Z_IMAGE_TEXT_ENCODER,
+        type: "qwen_image",
+        device: "cpu",
+      },
+    },
+    "3": {
+      class_type: "VAELoader",
+      inputs: {
+        vae_name: Z_IMAGE_VAE,
+      },
+    },
+  };
+
+  let modelRef: [string, number] = ["1", 0];
+  let clipRef: [string, number] = ["2", 0];
+
+  profile.loras.forEach((lora, index) => {
+    const nodeId = String(20 + index);
+    workflow[nodeId] = {
+      class_type: "LoraLoader",
+      inputs: {
+        model: modelRef,
+        clip: clipRef,
+        lora_name: lora.name,
+        strength_model: lora.strengthModel,
+        strength_clip: lora.strengthClip,
+      },
+    };
+    modelRef = [nodeId, 0];
+    clipRef = [nodeId, 1];
+  });
+
+  workflow["4"] = {
+    class_type: "CLIPTextEncode",
+    inputs: {
+      text: prompt,
+      clip: clipRef,
+    },
+  };
+  workflow["5"] = {
+    class_type: "CLIPTextEncode",
+    inputs: {
+      text: negativePrompt,
+      clip: clipRef,
+    },
+  };
+  workflow["6"] = {
+    class_type: "EmptyLatentImage",
+    inputs: {
+      width,
+      height,
+      batch_size: 1,
+    },
+  };
+  workflow["7"] = {
+    class_type: "KSampler",
+    inputs: {
+      model: modelRef,
+      positive: ["4", 0],
+      negative: ["5", 0],
+      latent_image: ["6", 0],
+      seed,
+      steps,
+      cfg,
+      sampler_name: "euler",
+      scheduler: "simple",
+      denoise: 1.0,
+    },
+  };
+  workflow["8"] = {
+    class_type: "VAEDecode",
+    inputs: {
+      samples: ["7", 0],
+      vae: ["3", 0],
+    },
+  };
+  workflow["9"] = {
+    class_type: "SaveImage",
+    inputs: {
+      images: ["8", 0],
+      filename_prefix: profile.filenamePrefix,
+    },
+  };
+
+  return workflow;
+}

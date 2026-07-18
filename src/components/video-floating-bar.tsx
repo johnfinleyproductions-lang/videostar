@@ -6,13 +6,16 @@ import {
   Send,
   Image as ImageIcon,
   X,
-  ChevronUp,
-  ChevronDown,
   Loader2,
   Settings2,
   Zap,
 } from "lucide-react";
-import { LTX_VIDEO_MODEL, getVramEstimate } from "@/lib/models";
+import {
+  LTX_VIDEO_MODEL,
+  VIDEO_MODEL_PROFILES,
+  getVramEstimate,
+  type VideoModelId,
+} from "@/lib/models";
 import type { ResolutionPreset } from "@/lib/types";
 
 interface VideoFloatingBarProps {
@@ -24,6 +27,8 @@ interface VideoFloatingBarProps {
   onDurationChange: (duration: number) => void;
   fps: number;
   onFpsChange: (fps: number) => void;
+  selectedModel: VideoModelId;
+  onModelChange: (model: VideoModelId) => void;
   sourceImage: File | null;
   onSourceImageChange: (file: File | null) => void;
   isGenerating: boolean;
@@ -40,6 +45,8 @@ export function VideoFloatingBar({
   onDurationChange,
   fps,
   onFpsChange,
+  selectedModel,
+  onModelChange,
   sourceImage,
   onSourceImageChange,
   isGenerating,
@@ -138,7 +145,7 @@ export function VideoFloatingBar({
               </div>
 
               {/* FPS */}
-              <div>
+              <div className="mb-4">
                 <label className="text-xs font-medium text-zinc-400 mb-2 block">
                   Frame Rate
                 </label>
@@ -154,6 +161,33 @@ export function VideoFloatingBar({
                       }`}
                     >
                       {f} fps
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Model */}
+              <div>
+                <label className="text-xs font-medium text-zinc-400 mb-2 block">
+                  Video Model
+                </label>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {VIDEO_MODEL_PROFILES.map((model) => (
+                    <button
+                      key={model.id}
+                      onClick={() => onModelChange(model.id)}
+                      className={`rounded-lg border px-3 py-2 text-left transition-colors ${
+                        selectedModel === model.id
+                          ? "border-purple-500/40 bg-purple-500/20 text-purple-200"
+                          : "border-zinc-700 bg-zinc-800 text-zinc-400 hover:border-zinc-600"
+                      }`}
+                    >
+                      <span className="block text-sm font-medium">
+                        {model.shortName}
+                      </span>
+                      <span className="mt-1 block text-xs text-zinc-500">
+                        {model.description}
+                      </span>
                     </button>
                   ))}
                 </div>
@@ -251,8 +285,10 @@ export function VideoFloatingBar({
           {/* Bottom Info Strip */}
           <div className="px-4 pb-2 flex items-center justify-between text-xs text-zinc-600">
             <span>
-              LTX-Video 2.3 &middot; {selectedResolution.label} &middot;{" "}
-              {duration}s &middot; {fps}fps
+              {VIDEO_MODEL_PROFILES.find((model) => model.id === selectedModel)
+                ?.shortName ?? "LTX-Video 2.3"}{" "}
+              &middot; {selectedResolution.label} &middot; {duration}s &middot;{" "}
+              {fps}fps
             </span>
             <span>Enter to generate &middot; Shift+Enter for newline</span>
           </div>

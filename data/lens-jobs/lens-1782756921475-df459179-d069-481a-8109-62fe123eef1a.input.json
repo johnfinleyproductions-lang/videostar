@@ -1,0 +1,18 @@
+{
+  "id": "lens-1782756921475-df459179-d069-481a-8109-62fe123eef1a",
+  "provider": "lens",
+  "model": "lens-turbo",
+  "repo_id": "/home/evergreen/lens/models/Lens-Turbo",
+  "prompt": "a quiet wooden desk by a window",
+  "negative_prompt": "",
+  "width": 768,
+  "height": 512,
+  "steps": 8,
+  "cfg": 1,
+  "dtype": "bfloat16",
+  "offload": true,
+  "output_path": "/mnt/v/Evergreen/apps/videostar/public/outputs/lens/lens-1782756921475-df459179-d069-481a-8109-62fe123eef1a.png",
+  "status_path": "/mnt/v/Evergreen/apps/videostar/data/lens-jobs/lens-1782756921475-df459179-d069-481a-8109-62fe123eef1a.json",
+  "log_path": "/mnt/v/Evergreen/apps/videostar/data/lens-jobs/lens-1782756921475-df459179-d069-481a-8109-62fe123eef1a.log",
+  "public_url": "http://192.168.4.187:3060/outputs/lens/lens-1782756921475-df459179-d069-481a-8109-62fe123eef1a.png"
+}

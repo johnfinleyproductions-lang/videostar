@@ -45,7 +45,9 @@ export function useVideoCreations(queue: VideoGenerationItem[]) {
 
   // Initial load
   useEffect(() => {
-    fetchHistory(0, "");
+    queueMicrotask(() => {
+      void fetchHistory(0, "");
+    });
   }, [fetchHistory]);
 
   // Refresh (reload from beginning)
@@ -92,6 +94,8 @@ export function useVideoCreations(queue: VideoGenerationItem[]) {
       frames: item.frames,
       duration: item.duration,
       resolution: item.resolution,
+      model: item.model,
+      modelName: item.modelName,
       progress: item.progress,
       sourceImageUrl: item.sourceImageUrl,
       seed: item.seed,

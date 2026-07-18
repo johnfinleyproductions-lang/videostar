@@ -1,0 +1,246 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "wan2.1_t2v_14B_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "Wan 2.1 T2V 14B"
+    }
+  },
+  "2": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "lora_name": "wan-alpha/epoch-13-1500_changed.safetensors",
+      "strength_model": 1.0
+    },
+    "_meta": {
+      "title": "Wan-Alpha LoRA"
+    }
+  },
+  "3": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+      "model": [
+        "30",
+        0
+      ],
+      "shift": 8.0
+    },
+    "_meta": {
+      "title": "Shift"
+    }
+  },
+  "4": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan",
+      "device": "default"
+    },
+    "_meta": {
+      "title": "UMT5-XXL Text Encoder"
+    }
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "A wisp of silver smoke curling upward, isolated element on a transparent background",
+      "clip": [
+        "4",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "FF Positive"
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "\u8272\u8c03\u8273\u4e3d\uff0c\u8fc7\u66dd\uff0c\u9759\u6001\uff0c\u7ec6\u8282\u6a21\u7cca\u4e0d\u6e05\uff0c\u5b57\u5e55\uff0c\u98ce\u683c\uff0c\u4f5c\u54c1\uff0c\u753b\u4f5c\uff0c\u753b\u9762\uff0c\u9759\u6b62\uff0c\u6574\u4f53\u53d1\u7070\uff0c\u6700\u5dee\u8d28\u91cf\uff0c\u4f4e\u8d28\u91cf\uff0cJPEG\u538b\u7f29\u6b8b\u7559\uff0c\u4e11\u964b\u7684\uff0c\u6b8b\u7f3a\u7684\uff0c\u591a\u4f59\u7684\u624b\u6307\uff0c\u753b\u5f97\u4e0d\u597d\u7684\u624b\u90e8\uff0c\u753b\u5f97\u4e0d\u597d\u7684\u8138\u90e8\uff0c\u7578\u5f62\u7684\uff0c\u6bc1\u5bb9\u7684\uff0c\u5f62\u6001\u7578\u5f62\u7684\u80a2\u4f53\uff0c\u624b\u6307\u878d\u5408\uff0c\u9759\u6b62\u4e0d\u52a8\u7684\u753b\u9762\uff0c\u6742\u4e71\u7684\u80cc\u666f\uff0c\u4e09\u6761\u817f\uff0c\u80cc\u666f\u4eba\u5f88\u591a\uff0c\u5012\u7740\u8d70",
+      "clip": [
+        "4",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "FF Negative"
+    }
+  },
+  "7": {
+    "class_type": "EmptyHunyuanLatentVideo",
+    "inputs": {
+      "width": 832,
+      "height": 480,
+      "length": 81,
+      "batch_size": 1
+    },
+    "_meta": {
+      "title": "FF Wan Video"
+    }
+  },
+  "8": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "3",
+        0
+      ],
+      "seed": 42,
+      "steps": 6,
+      "cfg": 1.0,
+      "sampler_name": "uni_pc",
+      "scheduler": "simple",
+      "positive": [
+        "5",
+        0
+      ],
+      "negative": [
+        "6",
+        0
+      ],
+      "latent_image": [
+        "7",
+        0
+      ],
+      "denoise": 1.0
+    },
+    "_meta": {
+      "title": "FF Sampler S1"
+    }
+  },
+  "9": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "wan-alpha/wan_alpha_2.1_vae_rgb_channel.safetensors"
+    },
+    "_meta": {
+      "title": "RGB VAE"
+    }
+  },
+  "10": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "wan-alpha/wan_alpha_2.1_vae_alpha_channel.safetensors"
+    },
+    "_meta": {
+      "title": "Alpha VAE"
+    }
+  },
+  "11": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "8",
+        0
+      ],
+      "vae": [
+        "9",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "RGB Decode"
+    }
+  },
+  "12": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "8",
+        0
+      ],
+      "vae": [
+        "10",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Alpha Decode"
+    }
+  },
+  "13": {
+    "class_type": "ImageToMask",
+    "inputs": {
+      "image": [
+        "12",
+        0
+      ],
+      "channel": "red"
+    },
+    "_meta": {
+      "title": "Alpha To Mask"
+    }
+  },
+  "14": {
+    "class_type": "InvertMask",
+    "inputs": {
+      "mask": [
+        "13",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Invert For Join (JoinImageWithAlpha re-inverts)"
+    }
+  },
+  "15": {
+    "class_type": "JoinImageWithAlpha",
+    "inputs": {
+      "image": [
+        "11",
+        0
+      ],
+      "alpha": [
+        "14",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "FF RGBA Join"
+    }
+  },
+  "16": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+      "images": [
+        "15",
+        0
+      ],
+      "frame_rate": 16,
+      "loop_count": 0,
+      "filename_prefix": "video/wan-alpha/FrameForge",
+      "format": "video/webm",
+      "pix_fmt": "yuva420p",
+      "crf": 20,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true
+    },
+    "_meta": {
+      "title": "FF Output"
+    }
+  },
+  "30": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ],
+      "lora_name": "wan-alpha/lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16.safetensors",
+      "strength_model": 1.0
+    },
+    "_meta": {
+      "title": "Distill LoRA",
+      "note": "lightx2v T2V cfg-step-distill v2 rank64 \u2014 endorsed by Wan-Alpha README for fast inference (4 steps, cfg 1). Chained AFTER the Wan-Alpha lora. Revert lane: wan_alpha.pre-distill.json (24 steps cfg 5, no distill)."
+    }
+  }
+}

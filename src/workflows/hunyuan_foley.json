@@ -1,0 +1,126 @@
+{
+  "1": {
+    "class_type": "VHS_LoadVideo",
+    "inputs": {
+      "video": "example.mp4",
+      "force_rate": 0,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 450,
+      "skip_first_frames": 0,
+      "select_every_nth": 1,
+      "format": "None"
+    },
+    "_meta": {
+      "title": "FF Load",
+      "note": "The (usually silent) footage to foley. force_rate 0 PRESERVES the source fps (this is a transform lane, matanyone.json's pattern): the sampler's fps AND duration inputs plus FF Output.frame_rate are all LINK-WIRED from FF Video Info, so the real loaded rate/length round-trip with no server-side numbers to desync. frame_load_cap is always patched by buildFoley (defensive FOLEY_MAX_SECONDS cap via the video-probe, fallback 30fps assumption → 450). Accepts input-dir refs (jobs/<id>/clip.mp4) and annotated '<subfolder>/<file> [output]' paths for foleying our own renders. The loader's own AUDIO output (slot 2) is DELIBERATELY unwired — the generated foley REPLACES any source track (see FF Output note)."
+    }
+  },
+  "2": {
+    "class_type": "VHS_VideoInfoLoaded",
+    "inputs": {
+      "video_info": [
+        "1",
+        3
+      ]
+    },
+    "_meta": {
+      "title": "FF Video Info",
+      "note": "Outputs of the LOADED frames: 0 = fps (FLOAT) → FF Foley.fps + FF Output.frame_rate; 2 = duration (FLOAT, frame_count/fps AFTER frame_load_cap) → FF Foley.duration. Linking duration (instead of patching a number) makes the audio length self-correct to exactly the loaded frame window: the sampler computes num_frames = int(duration*fps) = the loaded count, so no last-frame padding and no A/V drift — and a probe-less dispatch still gets a perfectly-sized soundtrack. NOTE: duration is a LINK, so ComfyUI's widget validation (sampler max 30.0s) never runs on it — the route's FOLEY_MAX_SECONDS frame cap is the real guard."
+    }
+  },
+  "3": {
+    "class_type": "HunyuanModelLoader",
+    "inputs": {
+      "model_name": "hunyuanvideo_foley.pth",
+      "precision": "bf16",
+      "quantization": "none"
+    },
+    "_meta": {
+      "title": "FF Foley Model",
+      "note": "Tencent HunyuanVideo-Foley main diffusion model (~10GB, tencent/HunyuanVideo-Foley), from ComfyUI/models/hunyuanfoley/ — all three .pth files verified in the live loader enums 2026-07-16. bf16 + no fp8 quantization: the loader's ping-pong offload (extractors ⇄ main model) keeps peak VRAM sane without weight quantization. The pack reads its OWN configs/hunyuanvideo-foley-xxl.yaml — the config.yaml the README says to place next to the weights is NOT needed."
+    }
+  },
+  "4": {
+    "class_type": "HunyuanDependenciesLoader",
+    "inputs": {
+      "vae_name": "vae_128d_48k.pth",
+      "synchformer_name": "synchformer_state_dict.pth"
+    },
+    "_meta": {
+      "title": "FF Foley Deps",
+      "note": "DAC-VAE (48kHz audio decode) + Synchformer (25fps timing/sync features) from local files, PLUS two RUNTIME HuggingFace fetches on first use (verified in nodes.py load_dependencies): google/siglip2-base-patch16-512 (visual content encoder, ~1.5GB) and laion/larger_clap_general (CLAP text tower + tokenizer, ~2GB download) — the first foley run on a fresh box pays that one-time download into the HF cache. The installed pack carries the transformers>=4.51 compat shim in hunyuanvideo_foley/models/synchformer/modeling_ast.py (find_pruneable_heads_and_indices local copy)."
+    }
+  },
+  "5": {
+    "class_type": "HunyuanFoleySampler",
+    "inputs": {
+      "hunyuan_model": [
+        "3",
+        0
+      ],
+      "hunyuan_deps": [
+        "4",
+        0
+      ],
+      "image": [
+        "1",
+        0
+      ],
+      "fps": [
+        "2",
+        0
+      ],
+      "duration": [
+        "2",
+        2
+      ],
+      "prompt": "",
+      "negative_prompt": "noisy, harsh",
+      "cfg_scale": 4.5,
+      "steps": 50,
+      "sampler": "euler",
+      "batch_size": 1,
+      "seed": 0,
+      "force_offload": true
+    },
+    "_meta": {
+      "title": "FF Foley",
+      "aliases": [
+        "FF Positive",
+        "FF Seed"
+      ],
+      "note": "ONE node carries the whole recipe (hence the FF Positive / FF Seed aliases — buildFoley patches prompt + seed HERE; negative_prompt only when the caller passes one). The text hint is OPTIONAL by design: empty prompt = pure video-driven SFX (the CLAP branch encodes the empty string, SigLIP2@8fps + Synchformer@25fps carry the conditioning — verified in nodes.py feature_process_from_tensors, which encodes [neg, pos] unconditionally). The template ships prompt \"\" so the pack's footsteps-on-ice widget default can never leak into a silent-auto run. negative_prompt 'noisy, harsh', cfg 4.5, 50 steps, euler = the pack defaults, template-locked. fps + duration are LINKS from FF Video Info (see its note). batch_size 1: the sampler returns waveform[0] anyway. force_offload true: model leaves VRAM after decode. Output = AUDIO dict at 48kHz (DAC-VAE sample rate), trimmed to duration."
+    }
+  },
+  "6": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+      "images": [
+        "1",
+        0
+      ],
+      "audio": [
+        "5",
+        0
+      ],
+      "frame_rate": [
+        "2",
+        0
+      ],
+      "loop_count": 0,
+      "filename_prefix": "video/foley/foley",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true
+    },
+    "_meta": {
+      "title": "FF Output",
+      "note": "MUX DECISION (the lane's deliverable): the ORIGINAL loaded frames + the GENERATED foley are combined IN-GRAPH into a ready h264 mp4 — mirroring how LIP-SYNC delivers video+audio, no external re-mux step. Cost accepted: the frames are decoded+re-encoded once (crf 19 ≈ visually lossless); anyone who wants the audio alone can strip it with ffmpeg -vn from the delivered mp4. The generated AUDIO deliberately REPLACES any source track (FF Load's audio output is unwired) — layering foley UNDER existing dialogue is an edit-suite job, not this lane's. frame_rate is LINK-WIRED from FF Video Info fps (source rate preserved, matanyone.json's proven idiom). trim_to_audio false: video length = the loaded frames; the 48kHz track ends within one 25fps sync-window of the last frame (duration link keeps them equal to the frame count)."
+    }
+  }
+}

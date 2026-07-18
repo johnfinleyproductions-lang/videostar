@@ -159,6 +159,8 @@ export function VideoStudio() {
         onDurationChange={studio.setDuration}
         fps={studio.fps}
         onFpsChange={studio.setFps}
+        selectedModel={studio.selectedModel}
+        onModelChange={studio.setSelectedModel}
         sourceImage={studio.sourceImage}
         onSourceImageChange={studio.setSourceImage}
         isGenerating={studio.isGenerating}

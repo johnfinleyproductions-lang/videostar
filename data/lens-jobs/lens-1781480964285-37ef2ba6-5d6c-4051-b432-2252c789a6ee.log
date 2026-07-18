@@ -1,0 +1,3 @@
+[2026-06-14T23:49:31.904879+00:00] loading Lens pipeline repo=/home/evergreen/lens/models/Lens-Turbo offload=True
+[2026-06-14T23:49:50.050033+00:00] running Lens generation
+[2026-06-14T23:50:08.591327+00:00] saved /mnt/v/Evergreen/apps/videostar/public/outputs/lens/lens-1781480964285-37ef2ba6-5d6c-4051-b432-2252c789a6ee.png size=1024x1024

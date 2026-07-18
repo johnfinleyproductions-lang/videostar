@@ -1,0 +1,363 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load High-Noise Expert"
+    },
+    "inputs": {
+      "unet_name": "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "2": {
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Low-Noise Expert"
+    },
+    "inputs": {
+      "unet_name": "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "3": {
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load UMT5 Text Encoder"
+    },
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan"
+    }
+  },
+  "4": {
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load Wan VAE"
+    },
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    }
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "FF Positive"
+    },
+    "inputs": {
+      "text": "",
+      "clip": [
+        "3",
+        0
+      ]
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "FF Negative"
+    },
+    "inputs": {
+      "text": "\u8272\u8c03\u8273\u4e3d\uff0c\u8fc7\u66dd\uff0c\u9759\u6001\uff0c\u7ec6\u8282\u6a21\u7cca\u4e0d\u6e05\uff0c\u5b57\u5e55\uff0c\u98ce\u683c\uff0c\u4f5c\u54c1\uff0c\u753b\u4f5c\uff0c\u753b\u9762\uff0c\u9759\u6b62\uff0c\u6574\u4f53\u53d1\u7070\uff0c\u6700\u5dee\u8d28\u91cf\uff0c\u4f4e\u8d28\u91cf\uff0cJPEG\u538b\u7f29\u6b8b\u7559\uff0c\u4e11\u964b\u7684\uff0c\u6b8b\u7f3a\u7684\uff0c\u591a\u4f59\u7684\u624b\u6307\uff0c\u753b\u5f97\u4e0d\u597d\u7684\u624b\u90e8\uff0c\u753b\u5f97\u4e0d\u597d\u7684\u8138\u90e8\uff0c\u7578\u5f62\u7684\uff0c\u6bc1\u5bb9\u7684\uff0c\u5f62\u6001\u7578\u5f62\u7684\u80a2\u4f53\uff0c\u624b\u6307\u878d\u5408\uff0c\u9759\u6b62\u4e0d\u52a8\u7684\u753b\u9762\uff0c\u6742\u4e71\u7684\u80cc\u666f\uff0c\u4e09\u6761\u817f\uff0c\u80cc\u666f\u4eba\u5f88\u591a\uff0c\u5012\u7740\u8d70",
+      "clip": [
+        "3",
+        0
+      ]
+    }
+  },
+  "7": {
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "FF Start Image"
+    },
+    "inputs": {
+      "image": "start.png",
+      "upload": "image"
+    }
+  },
+  "8": {
+    "class_type": "WanImageToVideo",
+    "_meta": {
+      "title": "FF Wan Video"
+    },
+    "inputs": {
+      "positive": [
+        "5",
+        0
+      ],
+      "negative": [
+        "6",
+        0
+      ],
+      "vae": [
+        "4",
+        0
+      ],
+      "width": 1280,
+      "height": 720,
+      "length": 81,
+      "batch_size": 1,
+      "start_image": [
+        "7",
+        0
+      ]
+    }
+  },
+  "9": {
+    "class_type": "WanMoEScheduler",
+    "_meta": {
+      "title": "MoE Shift Solver (boundary 0.90)"
+    },
+    "inputs": {
+      "model": [
+        "40",
+        0
+      ],
+      "scheduler": "sgm_uniform",
+      "steps_high": 4,
+      "steps_low": 4,
+      "boundary": 0.9,
+      "interval": 0.01,
+      "denoise": 1.0
+    }
+  },
+  "10": {
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "MoE Shift (High, no LoRA)"
+    },
+    "inputs": {
+      "model": [
+        "40",
+        0
+      ],
+      "shift": [
+        "9",
+        0
+      ]
+    }
+  },
+  "11": {
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Distill v1022 High LoRA"
+    },
+    "inputs": {
+      "model": [
+        "40",
+        0
+      ],
+      "lora_name": "wan22-distill-v1022/wan2.2_i2v_A14b_high_noise_lora_rank64_lightx2v_4step_1022.safetensors",
+      "strength_model": 1.0
+    }
+  },
+  "12": {
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "MoE Shift (High + LoRA)"
+    },
+    "inputs": {
+      "model": [
+        "11",
+        0
+      ],
+      "shift": [
+        "9",
+        0
+      ]
+    }
+  },
+  "13": {
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Distill v1022 Low LoRA"
+    },
+    "inputs": {
+      "model": [
+        "41",
+        0
+      ],
+      "lora_name": "wan22-distill-v1022/wan2.2_i2v_A14b_low_noise_lora_rank64_lightx2v_4step_1022.safetensors",
+      "strength_model": 1.0
+    }
+  },
+  "14": {
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "MoE Shift (Low + LoRA)"
+    },
+    "inputs": {
+      "model": [
+        "13",
+        0
+      ],
+      "shift": [
+        "9",
+        0
+      ]
+    }
+  },
+  "20": {
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "FF Sampler S1"
+    },
+    "inputs": {
+      "model": [
+        "10",
+        0
+      ],
+      "add_noise": "enable",
+      "noise_seed": 0,
+      "steps": 8,
+      "cfg": 3.5,
+      "sampler_name": "res_multistep",
+      "scheduler": "sgm_uniform",
+      "positive": [
+        "8",
+        0
+      ],
+      "negative": [
+        "8",
+        1
+      ],
+      "latent_image": [
+        "8",
+        2
+      ],
+      "start_at_step": 0,
+      "end_at_step": 2,
+      "return_with_leftover_noise": "enable"
+    }
+  },
+  "21": {
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "FF Sampler S2"
+    },
+    "inputs": {
+      "model": [
+        "12",
+        0
+      ],
+      "add_noise": "disable",
+      "noise_seed": 0,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "res_multistep",
+      "scheduler": "sgm_uniform",
+      "positive": [
+        "8",
+        0
+      ],
+      "negative": [
+        "8",
+        1
+      ],
+      "latent_image": [
+        "20",
+        0
+      ],
+      "start_at_step": 2,
+      "end_at_step": 4,
+      "return_with_leftover_noise": "enable"
+    }
+  },
+  "22": {
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "FF Sampler S3"
+    },
+    "inputs": {
+      "model": [
+        "14",
+        0
+      ],
+      "add_noise": "disable",
+      "noise_seed": 0,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "res_multistep",
+      "scheduler": "sgm_uniform",
+      "positive": [
+        "8",
+        0
+      ],
+      "negative": [
+        "8",
+        1
+      ],
+      "latent_image": [
+        "21",
+        0
+      ],
+      "start_at_step": 4,
+      "end_at_step": 8,
+      "return_with_leftover_noise": "disable"
+    }
+  },
+  "30": {
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    },
+    "inputs": {
+      "samples": [
+        "22",
+        0
+      ],
+      "vae": [
+        "4",
+        0
+      ]
+    }
+  },
+  "31": {
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "FF Output"
+    },
+    "inputs": {
+      "frame_rate": 16,
+      "loop_count": 0,
+      "filename_prefix": "FrameForge-Wan",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 10,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true,
+      "images": [
+        "30",
+        0
+      ]
+    }
+  },
+  "40": {
+    "class_type": "PathchSageAttentionKJ",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "sage_attention": "auto"
+    },
+    "_meta": {
+      "title": "Sage High",
+      "note": "SageAttention 1.0.6 triton (auto). In-graph per lane-1 research \u2014 NEVER the global flag. Revert: wan22-i2v.pre-sage.json"
+    }
+  },
+  "41": {
+    "class_type": "PathchSageAttentionKJ",
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ],
+      "sage_attention": "auto"
+    },
+    "_meta": {
+      "title": "Sage Low"
+    }
+  }
+}

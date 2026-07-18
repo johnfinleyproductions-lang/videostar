@@ -1,0 +1,61 @@
+{
+  "1": {
+    "class_type": "VHS_LoadVideo",
+    "inputs": {
+      "video": "",
+      "force_rate": 0,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 0,
+      "skip_first_frames": 0,
+      "select_every_nth": 1
+    },
+    "_meta": {
+      "title": "LOAD_VIDEO"
+    }
+  },
+  "2": {
+    "class_type": "RIFE VFI",
+    "inputs": {
+      "frames": [
+        "1",
+        0
+      ],
+      "ckpt_name": "rife49.pth",
+      "clear_cache_after_n_frames": 10,
+      "multiplier": 2,
+      "fast_mode": true,
+      "ensemble": true,
+      "scale_factor": 1,
+      "dtype": "float16",
+      "torch_compile": false,
+      "batch_size": 4
+    },
+    "_meta": {
+      "title": "RIFE_VFI",
+      "note": "needs-post-restart-validation: ComfyUI-Frame-Interpolation (Fannovel16) not loaded at authoring time; signature taken from pack README (frames, ckpt_name, clear_cache_after_n_frames, multiplier, fast_mode, ensemble, scale_factor). Re-check via /object_info/RIFE%20VFI after restart."
+    }
+  },
+  "3": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+      "images": [
+        "2",
+        0
+      ],
+      "frame_rate": 32,
+      "loop_count": 0,
+      "filename_prefix": "video/wan/final",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 16,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true
+    },
+    "_meta": {
+      "title": "SAVE_VIDEO"
+    }
+  }
+}

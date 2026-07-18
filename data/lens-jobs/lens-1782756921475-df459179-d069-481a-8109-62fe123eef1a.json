@@ -1,0 +1,24 @@
+{
+  "id": "lens-1782756921475-df459179-d069-481a-8109-62fe123eef1a",
+  "provider": "lens",
+  "model": "lens-turbo",
+  "filename": "lens-1782756921475-df459179-d069-481a-8109-62fe123eef1a.png",
+  "url": "http://192.168.4.187:3060/outputs/lens/lens-1782756921475-df459179-d069-481a-8109-62fe123eef1a.png",
+  "status": "completed",
+  "stage": "done",
+  "prompt": "a quiet wooden desk by a window",
+  "refined_prompt": "a quiet wooden desk by a window",
+  "path": "/mnt/v/Evergreen/apps/videostar/public/outputs/lens/lens-1782756921475-df459179-d069-481a-8109-62fe123eef1a.png",
+  "width": 1248,
+  "height": 832,
+  "settings": {
+    "base_resolution": 1024,
+    "aspect_ratio": "3:2",
+    "steps": 8,
+    "cfg": 1.0,
+    "seed": null,
+    "dtype": "bfloat16",
+    "offload": true
+  },
+  "updated_at": "2026-06-29T18:16:26.792087+00:00"
+}

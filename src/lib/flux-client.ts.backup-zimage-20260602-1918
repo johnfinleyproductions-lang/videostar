@@ -1,0 +1,163 @@
+// FrameForge — Flux 2 ComfyUI Client
+
+const FLUX_COMFYUI_URL =
+  process.env.FLUX_COMFYUI_URL || process.env.COMFYUI_URL || "http://127.0.0.1:8188";
+
+function derivePublicComfyUrl(): string {
+  if (process.env.FLUX_COMFYUI_PUBLIC_URL) return process.env.FLUX_COMFYUI_PUBLIC_URL;
+  if (process.env.NEXT_PUBLIC_COMFYUI_URL) return process.env.NEXT_PUBLIC_COMFYUI_URL;
+
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL;
+  if (appUrl) {
+    try {
+      const url = new URL(appUrl);
+      url.port = "8188";
+      return url.toString().replace(/\/$/, "");
+    } catch {
+      // Fall through to the internal URL below.
+    }
+  }
+
+  return FLUX_COMFYUI_URL;
+}
+
+const FLUX_COMFYUI_PUBLIC_URL = derivePublicComfyUrl();
+
+interface FluxPromptResponse {
+  prompt_id: string;
+  number: number;
+  node_errors: Record<string, unknown>;
+}
+
+interface FluxHistoryItem {
+  outputs: Record<
+    string,
+    {
+      images?: Array<{
+        filename: string;
+        subfolder: string;
+        type: string;
+      }>;
+    }
+  >;
+  status: {
+    status_str: string;
+    completed: boolean;
+  };
+}
+
+type ObjectInfoNode = {
+  input?: {
+    required?: Record<string, unknown>;
+  };
+};
+
+function extractComboValues(node: ObjectInfoNode | undefined, inputName: string): string[] {
+  const inputConfig = node?.input?.required?.[inputName];
+  if (!Array.isArray(inputConfig)) return [];
+  const values = inputConfig[0];
+  return Array.isArray(values) ? values.filter((value): value is string => typeof value === "string") : [];
+}
+
+export async function getFluxPreflight(): Promise<{
+  ok: boolean;
+  missing: string[];
+  comfyuiUrl: string;
+}> {
+  const res = await fetch(`${FLUX_COMFYUI_URL}/object_info`, {
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    return {
+      ok: false,
+      missing: [`ComfyUI object_info returned ${res.status}`],
+      comfyuiUrl: FLUX_COMFYUI_URL,
+    };
+  }
+
+  const objectInfo = (await res.json()) as Record<string, ObjectInfoNode>;
+  const missing: string[] = [];
+  const unetLoader = objectInfo.UnetLoaderGGUF;
+  const vaeLoader = objectInfo.VAELoader;
+  const clipLoader = objectInfo.CLIPLoader;
+
+  if (!unetLoader) {
+    missing.push("UnetLoaderGGUF node is unavailable");
+  } else if (!extractComboValues(unetLoader, "unet_name").includes("flux2-dev-Q3_K_M.gguf")) {
+    missing.push("flux2-dev-Q3_K_M.gguf is not visible to UnetLoaderGGUF");
+  }
+
+  if (!clipLoader) {
+    missing.push("CLIPLoader node is unavailable");
+  } else if (!extractComboValues(clipLoader, "clip_name").includes("mistral_3_small_flux2_fp8.safetensors")) {
+    missing.push("mistral_3_small_flux2_fp8.safetensors is not visible to CLIPLoader");
+  }
+
+  if (!vaeLoader) {
+    missing.push("VAELoader node is unavailable");
+  } else if (!extractComboValues(vaeLoader, "vae_name").includes("flux2-vae.safetensors")) {
+    missing.push("flux2-vae.safetensors is not visible to VAELoader");
+  }
+
+  return {
+    ok: missing.length === 0,
+    missing,
+    comfyuiUrl: FLUX_COMFYUI_URL,
+  };
+}
+
+export async function queueFluxPrompt(
+  workflow: Record<string, unknown>,
+  clientId: string,
+): Promise<FluxPromptResponse> {
+  const res = await fetch(`${FLUX_COMFYUI_URL}/prompt`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      prompt: workflow,
+      client_id: clientId,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Flux ComfyUI queue failed (${res.status}): ${text}`);
+  }
+
+  return res.json();
+}
+
+export async function getFluxHistory(
+  promptId: string,
+): Promise<FluxHistoryItem | null> {
+  const res = await fetch(`${FLUX_COMFYUI_URL}/history/${promptId}`);
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data[promptId] || null;
+}
+
+export function fluxOutputUrl(filename: string, subfolder: string): string {
+  const params = new URLSearchParams({
+    filename,
+    subfolder,
+    type: "output",
+  });
+  return `${FLUX_COMFYUI_PUBLIC_URL}/view?${params}`;
+}
+
+export function extractFluxImageFilename(
+  history: FluxHistoryItem,
+): { filename: string; subfolder: string } | null {
+  for (const nodeOutput of Object.values(history.outputs)) {
+    const images = nodeOutput.images;
+    if (images && images.length > 0) {
+      return {
+        filename: images[0].filename,
+        subfolder: images[0].subfolder || "",
+      };
+    }
+  }
+  return null;
+}
+
+export { FLUX_COMFYUI_URL, FLUX_COMFYUI_PUBLIC_URL };

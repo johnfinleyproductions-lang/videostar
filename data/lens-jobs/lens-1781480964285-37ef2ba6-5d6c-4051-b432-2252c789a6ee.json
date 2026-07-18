@@ -1,0 +1,24 @@
+{
+  "id": "lens-1781480964285-37ef2ba6-5d6c-4051-b432-2252c789a6ee",
+  "provider": "lens",
+  "model": "lens-turbo",
+  "filename": "lens-1781480964285-37ef2ba6-5d6c-4051-b432-2252c789a6ee.png",
+  "url": "http://192.168.4.187:3060/outputs/lens/lens-1781480964285-37ef2ba6-5d6c-4051-b432-2252c789a6ee.png",
+  "status": "completed",
+  "stage": "done",
+  "prompt": "A clean documentary B-roll still of a vintage typewriter on a wooden desk, direct mail envelopes, warm cinematic light, no readable text, high detail",
+  "refined_prompt": "A clean documentary B-roll still of a vintage typewriter on a wooden desk, direct mail envelopes, warm cinematic light, no readable text, high detail",
+  "path": "/mnt/v/Evergreen/apps/videostar/public/outputs/lens/lens-1781480964285-37ef2ba6-5d6c-4051-b432-2252c789a6ee.png",
+  "width": 1024,
+  "height": 1024,
+  "settings": {
+    "base_resolution": 1024,
+    "aspect_ratio": "1:1",
+    "steps": 4,
+    "cfg": 1.0,
+    "seed": 14062026,
+    "dtype": "bfloat16",
+    "offload": true
+  },
+  "updated_at": "2026-06-14T23:50:08.594358+00:00"
+}

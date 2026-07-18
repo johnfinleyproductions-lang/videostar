@@ -1,0 +1,348 @@
+{
+  "10": {
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Load LTX 2.3 Checkpoint"
+    },
+    "inputs": {
+      "ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors"
+    }
+  },
+  "11": {
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "Distilled LoRA 384 @0.5"
+    },
+    "inputs": {
+      "model": [
+        "10",
+        0
+      ],
+      "lora_name": "ltxv/ltx2/ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+      "strength_model": 0.5
+    }
+  },
+  "12": {
+    "class_type": "LTXAVTextEncoderLoader",
+    "_meta": {
+      "title": "Load Gemma Text Encoder"
+    },
+    "inputs": {
+      "text_encoder": "comfy_gemma_3_12B_it.safetensors",
+      "ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors",
+      "device": "default"
+    }
+  },
+  "13": {
+    "class_type": "LTXVAudioVAELoader",
+    "_meta": {
+      "title": "Load Audio VAE"
+    },
+    "inputs": {
+      "ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors"
+    }
+  },
+  "20": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "FF Positive"
+    },
+    "inputs": {
+      "text": "",
+      "clip": [
+        "12",
+        0
+      ]
+    }
+  },
+  "21": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "FF Negative"
+    },
+    "inputs": {
+      "text": "pc game, console game, video game, cartoon, childish, ugly",
+      "clip": [
+        "12",
+        0
+      ]
+    }
+  },
+  "22": {
+    "class_type": "LTXVConditioning",
+    "_meta": {
+      "title": "LTXV Conditioning 24fps"
+    },
+    "inputs": {
+      "positive": [
+        "20",
+        0
+      ],
+      "negative": [
+        "21",
+        0
+      ],
+      "frame_rate": 24
+    }
+  },
+  "30": {
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "FF Start Image"
+    },
+    "inputs": {
+      "image": "example.png"
+    }
+  },
+  "31": {
+    "class_type": "ResizeImageMaskNode",
+    "_meta": {
+      "title": "Resize Longer Edge 1536"
+    },
+    "inputs": {
+      "input": [
+        "30",
+        0
+      ],
+      "scale_method": "lanczos",
+      "resize_type": "scale longer dimension",
+      "resize_type.longer_size": 1536
+    }
+  },
+  "32": {
+    "class_type": "LTXVPreprocess",
+    "_meta": {
+      "title": "LTXV Preprocess"
+    },
+    "inputs": {
+      "image": [
+        "31",
+        0
+      ],
+      "img_compression": 18
+    }
+  },
+  "40": {
+    "class_type": "EmptyLTXVLatentVideo",
+    "_meta": {
+      "title": "Empty Video Latent 960x544x121"
+    },
+    "inputs": {
+      "width": 960,
+      "height": 544,
+      "length": 121,
+      "batch_size": 1
+    }
+  },
+  "41": {
+    "class_type": "LTXVImgToVideoConditionOnly",
+    "_meta": {
+      "title": "I2V Condition 0.7"
+    },
+    "inputs": {
+      "vae": [
+        "10",
+        2
+      ],
+      "image": [
+        "32",
+        0
+      ],
+      "latent": [
+        "40",
+        0
+      ],
+      "strength": 0.7,
+      "bypass": false
+    }
+  },
+  "42": {
+    "class_type": "LTXVEmptyLatentAudio",
+    "_meta": {
+      "title": "Empty Audio Latent"
+    },
+    "inputs": {
+      "frames_number": 121,
+      "frame_rate": 24,
+      "batch_size": 1,
+      "audio_vae": [
+        "13",
+        0
+      ]
+    }
+  },
+  "43": {
+    "class_type": "LTXVConcatAVLatent",
+    "_meta": {
+      "title": "Concat AV Latent S1"
+    },
+    "inputs": {
+      "video_latent": [
+        "41",
+        0
+      ],
+      "audio_latent": [
+        "42",
+        0
+      ]
+    }
+  },
+  "50": {
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "FF Seed"
+    },
+    "inputs": {
+      "noise_seed": 43
+    }
+  },
+  "51": {
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "Sampler euler_ancestral_cfg_pp"
+    },
+    "inputs": {
+      "sampler_name": "euler_ancestral_cfg_pp"
+    }
+  },
+  "52": {
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "CFG Guider S1"
+    },
+    "inputs": {
+      "model": [
+        "11",
+        0
+      ],
+      "positive": [
+        "22",
+        0
+      ],
+      "negative": [
+        "22",
+        1
+      ],
+      "cfg": 1
+    }
+  },
+  "53": {
+    "class_type": "ManualSigmas",
+    "_meta": {
+      "title": "Distilled Sigmas S1"
+    },
+    "inputs": {
+      "sigmas": "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
+    }
+  },
+  "54": {
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "FF Sampler S1"
+    },
+    "inputs": {
+      "noise": [
+        "50",
+        0
+      ],
+      "guider": [
+        "52",
+        0
+      ],
+      "sampler": [
+        "51",
+        0
+      ],
+      "sigmas": [
+        "53",
+        0
+      ],
+      "latent_image": [
+        "43",
+        0
+      ]
+    }
+  },
+  "60": {
+    "class_type": "LTXVSeparateAVLatent",
+    "_meta": {
+      "title": "Separate AV Latent"
+    },
+    "inputs": {
+      "av_latent": [
+        "54",
+        0
+      ]
+    }
+  },
+  "61": {
+    "class_type": "LTXVTiledVAEDecode",
+    "_meta": {
+      "title": "Tiled VAE Decode 2x2"
+    },
+    "inputs": {
+      "vae": [
+        "10",
+        2
+      ],
+      "latents": [
+        "60",
+        0
+      ],
+      "horizontal_tiles": 2,
+      "vertical_tiles": 2,
+      "overlap": 6,
+      "last_frame_fix": false,
+      "working_device": "auto",
+      "working_dtype": "auto"
+    }
+  },
+  "62": {
+    "class_type": "LTXVAudioVAEDecode",
+    "_meta": {
+      "title": "Audio VAE Decode"
+    },
+    "inputs": {
+      "samples": [
+        "60",
+        1
+      ],
+      "audio_vae": [
+        "13",
+        0
+      ]
+    }
+  },
+  "63": {
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "Create Video 24fps"
+    },
+    "inputs": {
+      "images": [
+        "61",
+        0
+      ],
+      "audio": [
+        "62",
+        0
+      ],
+      "fps": 24
+    }
+  },
+  "64": {
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "FF Output"
+    },
+    "inputs": {
+      "video": [
+        "63",
+        0
+      ],
+      "filename_prefix": "FrameForge/ltx23_flash",
+      "format": "mp4",
+      "codec": "h264"
+    }
+  }
+}

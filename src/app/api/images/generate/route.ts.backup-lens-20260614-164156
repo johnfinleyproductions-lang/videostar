@@ -1,0 +1,77 @@
+// POST /api/images/generate — Queue a Flux 2 generation.
+
+import { NextRequest, NextResponse } from "next/server";
+import { queueFluxPrompt, getFluxPreflight } from "@/lib/flux-client";
+import { buildFluxWorkflow } from "@/lib/flux-workflow-builder";
+
+export const dynamic = "force-dynamic";
+
+export async function GET() {
+  const preflight = await getFluxPreflight();
+  return NextResponse.json({
+    ok: preflight.ok,
+    status: preflight.ok ? "ready" : "unavailable",
+    missing: preflight.missing,
+    comfyuiUrl: preflight.comfyuiUrl,
+  });
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const {
+      prompt,
+      negativePrompt,
+      width,
+      height,
+      steps,
+      cfg,
+      seed,
+      referenceImage,
+      denoise,
+      model,
+    } = body;
+
+    if (!prompt || typeof prompt !== "string") {
+      return NextResponse.json({ error: "Prompt is required" }, { status: 400 });
+    }
+
+    const preflight = await getFluxPreflight(model);
+    if (!preflight.ok) {
+      return NextResponse.json(
+        {
+          error: "Image generation profile is not ready on this ComfyUI runtime",
+          missing: preflight.missing,
+          comfyuiUrl: preflight.comfyuiUrl,
+        },
+        { status: 503 },
+      );
+    }
+
+    const workflow = buildFluxWorkflow({
+      prompt,
+      negativePrompt,
+      width,
+      height,
+      steps,
+      cfg,
+      seed,
+      referenceImage,
+      denoise,
+      model,
+    });
+
+    const clientId = `frameforge-${Date.now()}`;
+    const response = await queueFluxPrompt(workflow, clientId);
+
+    return NextResponse.json({
+      prompt_id: response.prompt_id,
+      client_id: clientId,
+      status: "processing",
+    });
+  } catch (error) {
+    console.error("Flux generate error:", error);
+    const message = error instanceof Error ? error.message : "Generation failed";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}

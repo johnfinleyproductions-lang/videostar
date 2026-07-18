@@ -1,0 +1,19 @@
+{
+  "id": "lens-1781480964285-37ef2ba6-5d6c-4051-b432-2252c789a6ee",
+  "provider": "lens",
+  "model": "lens-turbo",
+  "repo_id": "/home/evergreen/lens/models/Lens-Turbo",
+  "prompt": "A clean documentary B-roll still of a vintage typewriter on a wooden desk, direct mail envelopes, warm cinematic light, no readable text, high detail",
+  "negative_prompt": "",
+  "width": 1024,
+  "height": 1024,
+  "steps": 4,
+  "cfg": 1,
+  "seed": 14062026,
+  "dtype": "bfloat16",
+  "offload": true,
+  "output_path": "/mnt/v/Evergreen/apps/videostar/public/outputs/lens/lens-1781480964285-37ef2ba6-5d6c-4051-b432-2252c789a6ee.png",
+  "status_path": "/mnt/v/Evergreen/apps/videostar/data/lens-jobs/lens-1781480964285-37ef2ba6-5d6c-4051-b432-2252c789a6ee.json",
+  "log_path": "/mnt/v/Evergreen/apps/videostar/data/lens-jobs/lens-1781480964285-37ef2ba6-5d6c-4051-b432-2252c789a6ee.log",
+  "public_url": "http://192.168.4.187:3060/outputs/lens/lens-1781480964285-37ef2ba6-5d6c-4051-b432-2252c789a6ee.png"
+}

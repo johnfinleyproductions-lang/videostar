@@ -136,6 +136,7 @@ export function VideoGridCard({
                   {creation.duration}s
                 </span>
               )}
+              {creation.modelName && <span>{creation.modelName}</span>}
             </div>
           </div>
 

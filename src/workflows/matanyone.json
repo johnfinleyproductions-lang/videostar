@@ -1,0 +1,140 @@
+{
+  "1": {
+    "class_type": "VHS_LoadVideo",
+    "inputs": {
+      "video": "example.mp4",
+      "force_rate": 0,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 900,
+      "skip_first_frames": 0,
+      "select_every_nth": 1,
+      "format": "None"
+    },
+    "_meta": {
+      "title": "FF Load",
+      "note": "The real footage to matte. force_rate 0 PRESERVES the source fps (this is a transform, not generation) — the output frame_rate is wired from FF Video Info so fps round-trips automatically; buildMatAnyone patches force_rate + FF Output frame_rate only when an explicit fps param asks for a resample. frame_load_cap is always patched (defensive 30s cap). Accepts input-dir refs (jobs/<id>/clip.mp4) and annotated '<subfolder>/<file> [output]' paths for matting our own renders."
+    }
+  },
+  "2": {
+    "class_type": "VHS_VideoInfoLoaded",
+    "inputs": {
+      "video_info": [
+        "1",
+        3
+      ]
+    },
+    "_meta": {
+      "title": "FF Video Info",
+      "note": "Output 0 = fps (FLOAT) of the LOADED frames — feeds FF Output.frame_rate so the webm plays back at exactly the source rate. The pack's own example workflow ships this exact wiring (VHS_VideoInfoLoaded.fps -> VHS_VideoCombine.frame_rate)."
+    }
+  },
+  "3": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {
+      "title": "FF Mask",
+      "note": "User-supplied first-frame seed mask: WHITE = subject, BLACK = background. Only a SEED — MatAnyone2's warmup (n_warmup steps on the repeated first frame) regenerates a clean matte from it before propagating through the clip, so a rough brush-over is fine. OPTIONAL at the API level: when no mask is supplied, buildMatAnyone DELETES this node (and MatAnyone2's foreground_mask input) and adds 'FF First Frame' (ImageFromBatch, loaded frame 0) -> 'FF Auto Mask' (BiRefNetRMBG BiRefNet-general) whose MASK output feeds MatAnyone2.foreground_MASK instead — those two titles are forbidden in this file (validate-templates.mjs) so the builder-added nodes never collide."
+    }
+  },
+  "4": {
+    "class_type": "MatAnyone2",
+    "inputs": {
+      "src_video": [
+        "1",
+        0
+      ],
+      "foreground_mask": [
+        "3",
+        0
+      ],
+      "mask_frame": 0,
+      "n_warmup": 10,
+      "r_erode": 0,
+      "r_dilate": 0,
+      "max_internal_size": -1,
+      "max_mem_frames": 5,
+      "use_long_term": false
+    },
+    "_meta": {
+      "title": "FF MatAnyone",
+      "note": "Video matting (pq-yang MatAnyone2 weights). foreground_mask takes the LoadImage IMAGE output directly (the node converts internally; no ImageToMask needed — matches the pack's example workflow). Its MASK-typed twin foreground_MASK (both optional in the live schema) is what the AUTO branch uses: buildMatAnyone wires BiRefNetRMBG's MASK output there when no seed mask is supplied. Outputs: 0 = matte (grayscale alpha as IMAGE, WHITE = subject — verified in run.py: green_screen = matte*src + (1-matte)*solid), 1 = green_screen composite (UNUSED here; solid_color is deliberately unwired, which makes output 1 an empty tensor at zero cost). mask_frame 0 = seed mask matches the first loaded frame. Memory knobs (max_internal_size/max_mem_frames/use_long_term) kept at pack defaults; raise use_long_term for very long clips."
+    }
+  },
+  "5": {
+    "class_type": "ImageToMask",
+    "inputs": {
+      "image": [
+        "4",
+        0
+      ],
+      "channel": "red"
+    },
+    "_meta": {
+      "title": "MATTE_TO_MASK",
+      "note": "The matte IMAGE is the alpha repeated to 3 identical channels; red carries it."
+    }
+  },
+  "6": {
+    "class_type": "InvertMask",
+    "inputs": {
+      "mask": [
+        "5",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Invert For Join (JoinImageWithAlpha re-inverts)",
+      "note": "Load-bearing, same discovery as wan_alpha.json: core JoinImageWithAlpha computes alpha = 1.0 - mask (SplitImageWithAlpha's inverse-mask convention). Matte WHITE = subject -> mask 1 at subject -> without this invert the subject would come out TRANSPARENT and the background opaque."
+    }
+  },
+  "7": {
+    "class_type": "JoinImageWithAlpha",
+    "inputs": {
+      "image": [
+        "1",
+        0
+      ],
+      "alpha": [
+        "6",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "FF RGBA Join",
+      "note": "Straight (non-premultiplied) alpha over the ORIGINAL source frames — MatAnyone2 has no foreground-color output, so soft edges keep the source's edge pixels."
+    }
+  },
+  "8": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+      "images": [
+        "7",
+        0
+      ],
+      "audio": [
+        "1",
+        2
+      ],
+      "frame_rate": [
+        "2",
+        0
+      ],
+      "loop_count": 0,
+      "filename_prefix": "video/matanyone/matte",
+      "format": "video/webm",
+      "pix_fmt": "yuva420p",
+      "crf": 20,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true
+    },
+    "_meta": {
+      "title": "FF Output",
+      "note": "Same proven MG-ALPHA output idiom: VP9 webm with pix_fmt yuva420p so the alpha channel survives encoding (VHS webm format enum verified live: pix_fmt in [yuv420p, yuva420p]). AUDIO passthrough: the source clip's audio (FF Load output 2, already trimmed to the loaded frame window by VHS) is muxed via the webm format's libvorbis audio_pass — a silent source simply yields no audio track. frame_rate is LINKED from FF Video Info fps by default (source fps preserved); buildMatAnyone overwrites the link with a number only when the caller passes an explicit fps."
+    }
+  }
+}

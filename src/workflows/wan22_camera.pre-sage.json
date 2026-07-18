@@ -1,0 +1,164 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "wan2.2_fun_camera_high_noise_14B_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": { "title": "MODEL_HIGH" }
+  },
+  "2": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "wan2.2_fun_camera_low_noise_14B_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": { "title": "MODEL_LOW" }
+  },
+  "3": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan"
+    },
+    "_meta": { "title": "CLIP" }
+  },
+  "4": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    },
+    "_meta": { "title": "VAE" }
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "",
+      "clip": ["3", 0]
+    },
+    "_meta": { "title": "FF Positive" }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
+      "clip": ["3", 0]
+    },
+    "_meta": { "title": "FF Negative" }
+  },
+  "7": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": { "title": "FF Start Image" }
+  },
+  "8": {
+    "class_type": "WanCameraEmbedding",
+    "inputs": {
+      "camera_pose": "Zoom In",
+      "width": 1280,
+      "height": 720,
+      "length": 81,
+      "speed": 1.0
+    },
+    "_meta": {
+      "title": "FF Camera",
+      "note": "camera_pose options (validated against object_info): Static, Pan Up, Pan Down, Pan Left, Pan Right, Zoom In, Zoom Out, Anti Clockwise (ACW), ClockWise (CW)"
+    }
+  },
+  "9": {
+    "class_type": "WanCameraImageToVideo",
+    "inputs": {
+      "positive": ["5", 0],
+      "negative": ["6", 0],
+      "vae": ["4", 0],
+      "width": ["8", 1],
+      "height": ["8", 2],
+      "length": ["8", 3],
+      "batch_size": 1,
+      "start_image": ["7", 0],
+      "camera_conditions": ["8", 0]
+    },
+    "_meta": { "title": "FF Wan Video" }
+  },
+  "10": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+      "model": ["1", 0],
+      "shift": 5
+    },
+    "_meta": { "title": "SHIFT_HIGH" }
+  },
+  "11": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {
+      "model": ["2", 0],
+      "shift": 5
+    },
+    "_meta": { "title": "SHIFT_LOW" }
+  },
+  "13": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+      "model": ["10", 0],
+      "add_noise": "enable",
+      "noise_seed": 0,
+      "steps": 20,
+      "cfg": 3.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "positive": ["9", 0],
+      "negative": ["9", 1],
+      "latent_image": ["9", 2],
+      "start_at_step": 0,
+      "end_at_step": 10,
+      "return_with_leftover_noise": "enable"
+    },
+    "_meta": { "title": "FF Sampler S1", "aliases": ["FF Seed"] }
+  },
+  "14": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+      "model": ["11", 0],
+      "add_noise": "disable",
+      "noise_seed": 0,
+      "steps": 20,
+      "cfg": 3.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "positive": ["9", 0],
+      "negative": ["9", 1],
+      "latent_image": ["13", 0],
+      "start_at_step": 10,
+      "end_at_step": 20,
+      "return_with_leftover_noise": "disable"
+    },
+    "_meta": { "title": "FF Sampler S2" }
+  },
+  "16": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["14", 0],
+      "vae": ["4", 0]
+    },
+    "_meta": { "title": "DECODE" }
+  },
+  "17": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+      "images": ["16", 0],
+      "frame_rate": 16,
+      "loop_count": 0,
+      "filename_prefix": "video/wan/camera",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 10,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true
+    },
+    "_meta": { "title": "FF Output" }
+  }
+}

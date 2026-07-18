@@ -91,6 +91,8 @@ The system hard-locks (frozen screen, no SSH, requires power cycle) within secon
 
 ## Model Setup
 
+For day-to-day tuning, see [Video Quality Controls](docs/VIDEO-QUALITY-CONTROLS.md). It explains which knobs change prompt adherence, style, speed, and VRAM, and records the current known-good Classic recipe.
+
 ### Required models (all downloaded and verified)
 
 ```
