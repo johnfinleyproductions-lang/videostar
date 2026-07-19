@@ -94,6 +94,55 @@ function embeddedFleet(): FleetWorker[] {
   ];
 }
 
+/**
+ * Normalize an override's `lanes` value (runtime JSON — any shape). Returns
+ * "*", a clean string array, or undefined for an invalid shape (caller keeps
+ * the embedded value). Valid JSON with a hostile shape (lanes as a bare
+ * string / number / null, non-string elements) must degrade with a warning,
+ * never crash resolveWorkerForLane on every subsequent dispatch.
+ */
+function normalizeLanes(
+  value: unknown,
+  workerName: string,
+): "*" | string[] | undefined {
+  if (value === "*") return "*";
+  if (Array.isArray(value)) {
+    const lanes = value.filter(
+      (l): l is string => typeof l === "string" && l.trim().length > 0,
+    );
+    if (lanes.length !== value.length) {
+      console.warn(
+        `[FrameForge] ${FLEET_ENV_OVERRIDE}: dropped non-string lane entries for worker "${workerName}"`,
+      );
+    }
+    return lanes.map((l) => l.trim());
+  }
+  console.warn(
+    `[FrameForge] ${FLEET_ENV_OVERRIDE}: worker "${workerName}" lanes must be "*" or a string array — ignored`,
+  );
+  return undefined;
+}
+
+/**
+ * Normalize an override's base URL value (runtime JSON — any shape).
+ * A string cleans as usual; null explicitly UNSETS the base (disables the
+ * worker); any other type warns and unsets — a number/object must never
+ * String() into a garbage base like "null".
+ */
+function normalizeBase(
+  value: unknown,
+  field: string,
+  workerName: string,
+): string | undefined {
+  if (typeof value === "string") return cleanBase(value);
+  if (value !== null) {
+    console.warn(
+      `[FrameForge] ${FLEET_ENV_OVERRIDE}: worker "${workerName}" ${field} must be a string (or null to disable) — treating as unset`,
+    );
+  }
+  return undefined;
+}
+
 /** Parse the FRAMEFORGE_FLEET JSON override; [] when unset/invalid. */
 function envFleetOverride(): Partial<FleetWorker>[] {
   const raw = process.env[FLEET_ENV_OVERRIDE];
@@ -124,28 +173,38 @@ function envFleetOverride(): Partial<FleetWorker>[] {
 export function getFleet(): FleetWorker[] {
   const fleet = embeddedFleet();
   for (const override of envFleetOverride()) {
-    const existing = fleet.find((w) => w.name === override.name);
+    const name = (override.name as string).trim();
+    const existing = fleet.find((w) => w.name === name);
     if (existing) {
       if (override.comfyBase !== undefined) {
-        existing.comfyBase = cleanBase(String(override.comfyBase));
+        existing.comfyBase = normalizeBase(override.comfyBase, "comfyBase", name);
       }
       if (override.wsBase !== undefined) {
-        existing.wsBase = cleanBase(String(override.wsBase));
+        existing.wsBase = normalizeBase(override.wsBase, "wsBase", name);
       }
-      if (override.lanes !== undefined) existing.lanes = override.lanes;
+      if (override.lanes !== undefined) {
+        // Invalid shape → keep the embedded lanes (normalizeLanes warned).
+        const lanes = normalizeLanes(override.lanes, name);
+        if (lanes !== undefined) existing.lanes = lanes;
+      }
       if (override.isDefault !== undefined) {
         existing.isDefault = Boolean(override.isDefault);
       }
     } else {
       fleet.push({
-        name: (override.name as string).trim(),
-        comfyBase: cleanBase(
-          override.comfyBase === undefined ? undefined : String(override.comfyBase),
-        ),
-        wsBase: cleanBase(
-          override.wsBase === undefined ? undefined : String(override.wsBase),
-        ),
-        lanes: override.lanes ?? [],
+        name,
+        comfyBase:
+          override.comfyBase === undefined
+            ? undefined
+            : normalizeBase(override.comfyBase, "comfyBase", name),
+        wsBase:
+          override.wsBase === undefined
+            ? undefined
+            : normalizeBase(override.wsBase, "wsBase", name),
+        lanes:
+          override.lanes === undefined
+            ? []
+            : (normalizeLanes(override.lanes, name) ?? []),
         isDefault: Boolean(override.isDefault),
       });
     }
@@ -224,7 +283,14 @@ export function resolveWorkerForLane(laneOrKind: string): FleetWorker[] {
   };
 
   for (const worker of enabled) {
-    if (worker.lanes !== "*" && worker.lanes.some((l) => l.toLowerCase() === lane)) {
+    // Array.isArray + typeof guards: worker.lanes is normalized at parse
+    // time, but a dispatch crash on every job is the one failure mode this
+    // module must never have — guard at the use site too.
+    if (
+      worker.lanes !== "*" &&
+      Array.isArray(worker.lanes) &&
+      worker.lanes.some((l) => typeof l === "string" && l.toLowerCase() === lane)
+    ) {
       push(worker);
     }
   }
