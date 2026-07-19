@@ -5,6 +5,7 @@ import {
   getFluxHistory,
   extractFluxImageFilename,
   fluxOutputUrl,
+  resolveFluxComfyBase,
 } from "@/lib/flux-client";
 import { getLensJobStatus, isLensJobId } from "@/lib/lens-client";
 
@@ -22,7 +23,9 @@ export async function GET(
       return NextResponse.json(await getLensJobStatus(id));
     }
 
-    const history = await getFluxHistory(id);
+    // Same deterministic stills worker the dispatch used (see flux-client).
+    const fluxBase = resolveFluxComfyBase();
+    const history = await getFluxHistory(fluxBase, id);
 
     if (!history) {
       return NextResponse.json({
@@ -38,7 +41,7 @@ export async function GET(
         return NextResponse.json({
           id,
           status: "completed",
-          url: fluxOutputUrl(output.filename, output.subfolder),
+          url: fluxOutputUrl(fluxBase, output.filename, output.subfolder),
           filename: output.filename,
           provider: "comfyui",
         });

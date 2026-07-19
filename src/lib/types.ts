@@ -439,6 +439,15 @@ export interface VideoGenerationItem {
   filename?: string;
   model?: string;
   modelName?: string;
+  /**
+   * Fleet worker NAME (never a URL — bases live in src/lib/fleet.ts) the job
+   * was dispatched to; stamped by the generate/finish routes at dispatch.
+   * MISSING = the legacy default worker (all pre-fleet history items): the
+   * status/output routes resolve it via getWorkerComfyBase(item.worker),
+   * which maps undefined → the default worker, so every existing history
+   * item keeps polling and proxying exactly the box it always did.
+   */
+  worker?: string;
   // --- Finisher jobs (/api/finish: FlashVSR / SeedVR2 upscale) ---
   /**
    * Job family. "finish" = a follow-on upscale job on an already-rendered

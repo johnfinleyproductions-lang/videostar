@@ -1,9 +1,31 @@
 ﻿// FrameForge â€” Flux 2 ComfyUI Client
+//
+// MULTI-WORKER (2026-07): like comfyui-client.ts, this module is now
+// base-agnostic — the network helpers take the target worker's ComfyUI base
+// as their FIRST parameter. The stills path resolves its worker through
+// resolveFluxComfyBase(): the FLUX_COMFYUI_URL env override still wins (the
+// pre-fleet contract), otherwise the first enabled "flux-image" lane worker
+// from the fleet (framerstation when active, else the default vidbox).
+// Resolution is DETERMINISTIC (first candidate, no availability ping): the
+// images API is stateless (the client holds only a prompt_id), so dispatch
+// and status polling must land on the same worker every time.
 
-const FLUX_COMFYUI_URL =
-  process.env.FLUX_COMFYUI_URL || process.env.COMFYUI_URL || "http://127.0.0.1:8188";
+import { resolveWorkerForLane } from "./fleet";
 
-function derivePublicComfyUrl(): string {
+/** ComfyUI base for the FLUX/Z-Image stills lane (see module note above). */
+export function resolveFluxComfyBase(): string {
+  if (process.env.FLUX_COMFYUI_URL) return process.env.FLUX_COMFYUI_URL;
+  const [first] = resolveWorkerForLane("flux-image");
+  // resolveWorkerForLane always includes the default worker, whose comfyBase
+  // is always set (vidbox falls back to http://127.0.0.1:8188).
+  return first?.comfyBase ?? "http://127.0.0.1:8188";
+}
+
+/**
+ * Browser-facing base for /view URLs handed to the client (fluxOutputUrl).
+ * Env overrides win; the final fallback is the internal base passed in.
+ */
+export function resolveFluxPublicBase(internalBase: string): string {
   if (process.env.FLUX_COMFYUI_PUBLIC_URL) return process.env.FLUX_COMFYUI_PUBLIC_URL;
   if (process.env.NEXT_PUBLIC_COMFYUI_URL) return process.env.NEXT_PUBLIC_COMFYUI_URL;
 
@@ -18,10 +40,8 @@ function derivePublicComfyUrl(): string {
     }
   }
 
-  return FLUX_COMFYUI_URL;
+  return internalBase;
 }
-
-const FLUX_COMFYUI_PUBLIC_URL = derivePublicComfyUrl();
 
 interface FluxPromptResponse {
   prompt_id: string;
@@ -133,19 +153,22 @@ function getFluxPreflightProfile(model?: string): FluxPreflightProfile {
   };
 }
 
-export async function getFluxPreflight(model?: string): Promise<{
+export async function getFluxPreflight(
+  base: string,
+  model?: string,
+): Promise<{
   ok: boolean;
   missing: string[];
   comfyuiUrl: string;
 }> {
-  const res = await fetch(`${FLUX_COMFYUI_URL}/object_info`, {
+  const res = await fetch(`${base}/object_info`, {
     cache: "no-store",
   });
   if (!res.ok) {
     return {
       ok: false,
       missing: [`ComfyUI object_info returned ${res.status}`],
-      comfyuiUrl: FLUX_COMFYUI_URL,
+      comfyuiUrl: base,
     };
   }
 
@@ -153,7 +176,7 @@ export async function getFluxPreflight(model?: string): Promise<{
   const missing: string[] = [];
   const zImageProfile = isZImageProfile(model) ? model : null;
   if (zImageProfile) {
-    return getZImagePreflight(objectInfo, zImageProfile);
+    return getZImagePreflight(base, objectInfo, zImageProfile);
   }
 
   const fluxProfile = getFluxPreflightProfile(model);
@@ -190,7 +213,7 @@ export async function getFluxPreflight(model?: string): Promise<{
   return {
     ok: missing.length === 0,
     missing,
-    comfyuiUrl: FLUX_COMFYUI_URL,
+    comfyuiUrl: base,
   };
 }
 
@@ -202,6 +225,7 @@ function isZImageProfile(model: string | undefined): model is ZImageProfile {
 }
 
 function getZImagePreflight(
+  base: string,
   objectInfo: Record<string, ObjectInfoNode>,
   profileId: ZImageProfile,
 ): {
@@ -252,15 +276,16 @@ function getZImagePreflight(
   return {
     ok: missing.length === 0,
     missing,
-    comfyuiUrl: FLUX_COMFYUI_URL,
+    comfyuiUrl: base,
   };
 }
 
 export async function queueFluxPrompt(
+  base: string,
   workflow: Record<string, unknown>,
   clientId: string,
 ): Promise<FluxPromptResponse> {
-  const res = await fetch(`${FLUX_COMFYUI_URL}/prompt`, {
+  const res = await fetch(`${base}/prompt`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -278,21 +303,26 @@ export async function queueFluxPrompt(
 }
 
 export async function getFluxHistory(
+  base: string,
   promptId: string,
 ): Promise<FluxHistoryItem | null> {
-  const res = await fetch(`${FLUX_COMFYUI_URL}/history/${promptId}`);
+  const res = await fetch(`${base}/history/${promptId}`);
   if (!res.ok) return null;
   const data = await res.json();
   return data[promptId] || null;
 }
 
-export function fluxOutputUrl(filename: string, subfolder: string): string {
+export function fluxOutputUrl(
+  internalBase: string,
+  filename: string,
+  subfolder: string,
+): string {
   const params = new URLSearchParams({
     filename,
     subfolder,
     type: "output",
   });
-  return `${FLUX_COMFYUI_PUBLIC_URL}/view?${params}`;
+  return `${resolveFluxPublicBase(internalBase)}/view?${params}`;
 }
 
 export function extractFluxImageFilename(
@@ -309,5 +339,3 @@ export function extractFluxImageFilename(
   }
   return null;
 }
-
-export { FLUX_COMFYUI_URL, FLUX_COMFYUI_PUBLIC_URL };

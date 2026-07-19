@@ -72,6 +72,7 @@ import {
   type VideoModelProfile,
 } from "@/lib/models";
 import { getLane, resolveLaneModelId } from "@/lib/lanes";
+import { pickWorker, resolveWorkerForLane, type FleetWorker } from "@/lib/fleet";
 import {
   buildRemotionProps,
   createRemotionRender,
@@ -226,6 +227,7 @@ interface VideoSource {
  * no source is provided.
  */
 async function resolveVideoRef(
+  comfyBase: string,
   source: VideoSource,
   fallbackName: string,
   subfolder: string,
@@ -277,7 +279,7 @@ async function resolveVideoRef(
     filename = `${fallbackName}-${filename}`;
   }
 
-  const uploaded = await uploadInputVideo(buffer, filename, subfolder);
+  const uploaded = await uploadInputVideo(comfyBase, buffer, filename, subfolder);
   console.log(`[FrameForge] Uploaded ${label} → ${uploaded.videoRef}`);
   return { ref: uploaded.videoRef, bytes: buffer };
 }
@@ -348,8 +350,10 @@ export async function POST(request: NextRequest) {
     // ------------------------------------------------------------------
     // Resolve input images (start frame + optional end frame)
     // ------------------------------------------------------------------
-    // New-style sources are fetched server-side and uploaded to ComfyUI;
-    // legacy `sourceImage` / `endImage` are filenames already in the input
+    // New-style sources are fetched/decoded server-side into BUFFERS here;
+    // the actual ComfyUI upload is DEFERRED until after the fleet worker is
+    // chosen below, so input files always land on the box that runs the job.
+    // Legacy `sourceImage` / `endImage` are filenames already in the input
     // folder (uploaded via /api/upload) and pass through untouched.
     let imageName: string | undefined;
     let endImageName: string | undefined;
@@ -360,15 +364,7 @@ export async function POST(request: NextRequest) {
           { url: body.imageUrl, base64: body.imageBase64, path: body.imagePath },
           "start",
         );
-    if (startSource) {
-      const uploaded = await uploadInputImage(
-        startSource.buffer,
-        startSource.filename,
-        `jobs/${id}`,
-      );
-      imageName = uploaded.imageRef;
-      console.log(`[FrameForge] Uploaded start image → ${imageName}`);
-    } else if (typeof body.sourceImage === "string" && body.sourceImage) {
+    if (!startSource && typeof body.sourceImage === "string" && body.sourceImage) {
       imageName = body.sourceImage;
     }
 
@@ -382,22 +378,16 @@ export async function POST(request: NextRequest) {
           },
           "end",
         );
-    if (endSource) {
-      const uploaded = await uploadInputImage(
-        endSource.buffer,
-        endSource.filename,
-        `jobs/${id}`,
-      );
-      endImageName = uploaded.imageRef;
-      console.log(`[FrameForge] Uploaded end image → ${endImageName}`);
-    } else if (typeof body.endImage === "string" && body.endImage) {
+    if (!endSource && typeof body.endImage === "string" && body.endImage) {
       endImageName = body.endImage;
     }
 
     // ------------------------------------------------------------------
     // Lane routing (image → Wan 2.2 I2V, no image → repaired LTX)
     // ------------------------------------------------------------------
-    const hasImage = Boolean(imageName);
+    // Presence-based: a resolved-but-not-yet-uploaded buffer counts exactly
+    // like the pre-fleet uploaded ref did.
+    const hasImage = Boolean(startSource) || Boolean(imageName);
     let requestedModel: string | undefined = body.model || body.profile;
 
     // Optional laneKey (additive; see GET /api/lanes). An explicit model
@@ -432,10 +422,177 @@ export async function POST(request: NextRequest) {
     }
 
     // ------------------------------------------------------------------
+    // Model resolution (moved ABOVE the prerequisite blocks — a pure
+    // function of requestedModel + input PRESENCE, so resolving early is
+    // behavior-neutral) — the profile's `kind` drives fleet worker selection
+    // below, which must happen BEFORE any input bytes are uploaded.
+    // ------------------------------------------------------------------
+    const endImagePresent = Boolean(endSource) || Boolean(endImageName);
+    let modelId = resolveVideoModelId(requestedModel, hasImage);
+    if (hasImage && endImagePresent) {
+      // End frame present → FLF2V template unless an explicit Wan profile
+      // already supports it. The fun-camera lane is exempt: an explicit
+      // camera-move request must not be silently rerouted (the end image is
+      // ignored there instead).
+      const candidate = getVideoModelProfile(modelId);
+      if (
+        candidate.kind === "wan-i2v" &&
+        !candidate.supportsEndImage &&
+        candidate.id !== "wan22-camera"
+      ) {
+        modelId = "wan22-flf2v";
+      }
+    }
+    const modelProfile = getVideoModelProfile(modelId);
+
+    // ------------------------------------------------------------------
+    // Remotion MG-TYPE lane (motion graphics — proxied to think)
+    // ------------------------------------------------------------------
+    // Explicit selection only (model "mg-type" or laneKey "MG-TYPE"). NOT a
+    // ComfyUI dispatch: composition + props are validated here, then POSTed
+    // to the think render service (192.168.4.200:3070) and tracked via the
+    // history item's remoteJobId (kind "remotion" — the status route polls
+    // think instead of ComfyUI history). Sits BEFORE fleet worker selection
+    // and the VRAM sweep on purpose: a CPU render on another machine must
+    // neither pick a ComfyUI worker nor evict models on one. Stray imageUrl
+    // is ignored (kind "remotion" is exempt from the image reroute); prompt
+    // is optional (the props ARE the content).
+    if (modelProfile.kind === "remotion") {
+      const compositionRaw =
+        typeof body.composition === "string" ? body.composition.trim() : "";
+      const composition = compositionRaw
+        ? getRemotionComposition(compositionRaw)
+        : undefined;
+      if (!composition) {
+        return NextResponse.json(
+          {
+            error:
+              (compositionRaw
+                ? `Unknown composition "${compositionRaw}" for the MG-TYPE lane`
+                : "The MG-TYPE lane requires a composition") +
+              ` — valid compositions: ${REMOTION_COMPOSITION_IDS.join(", ")}` +
+              " (live catalog: GET /health on the think render service)",
+            compositions: REMOTION_COMPOSITION_IDS,
+          },
+          { status: 400 },
+        );
+      }
+
+      const built = buildRemotionProps(composition, body);
+      if ("error" in built) {
+        return NextResponse.json({ error: built.error }, { status: 400 });
+      }
+
+      let remote: { jobId: string };
+      try {
+        remote = await createRemotionRender(
+          composition.id,
+          built.props,
+          typeof body.seed === "number" ? body.seed : undefined,
+        );
+      } catch (error) {
+        if (error instanceof RemotionServiceUnreachableError) {
+          // The one lane whose executor lives on another box: answer an
+          // honest 503 with the restart runbook instead of a generic 500.
+          return NextResponse.json({ error: error.message }, { status: 503 });
+        }
+        // The service answered but rejected the job (its own 400 copy —
+        // e.g. a prop the hardcoded mirror doesn't know about yet).
+        const message =
+          error instanceof Error ? error.message : "Remotion dispatch failed";
+        return NextResponse.json(
+          { error: message },
+          { status: message.includes("(400)") ? 400 : 502 },
+        );
+      }
+
+      const item: VideoGenerationItem = {
+        id,
+        status: "processing",
+        // History display: the composition props are the content.
+        prompt:
+          prompt.trim() ||
+          `${composition.id}: ${built.props.title ?? ""} — ${built.props.subtitle ?? ""}`,
+        kind: "remotion",
+        remoteJobId: remote.jobId,
+        width: composition.width,
+        height: composition.height,
+        fps: composition.fps,
+        frames: composition.durationInFrames,
+        duration: composition.durationInFrames / composition.fps,
+        resolution: `${composition.width}x${composition.height}`,
+        seed: typeof body.seed === "number" ? body.seed : undefined,
+        model: modelProfile.id,
+        modelName: modelProfile.name,
+        // No `worker` stamp: the render runs on the think REMOTION service,
+        // not a ComfyUI fleet worker (the status route polls remoteJobId).
+        createdAt: new Date().toISOString(),
+        progress: 0,
+      };
+
+      await addToHistory(item);
+      console.log(
+        `[FrameForge] MG-TYPE dispatched to think: ${composition.id} (remote job ${remote.jobId})`,
+      );
+
+      return NextResponse.json({
+        id,
+        // No ComfyUI prompt / websocket for the remotion lane; keep the
+        // public response shape uniform (the LTX Desktop sidecar precedent).
+        comfyPromptId: "",
+        clientId: "",
+        status: "processing",
+      });
+    }
+
+    // ------------------------------------------------------------------
+    // Fleet worker selection (BEFORE any upload/probe touches a box)
+    // ------------------------------------------------------------------
+    // Candidates: lane-specific enabled workers first, then the default.
+    // With only vidbox enabled (today's deployed env) there is exactly one
+    // candidate and pickWorker short-circuits with NO availability ping —
+    // request pattern and failure surface stay byte-identical to the
+    // single-base build. Every upload, probe, VRAM sweep, and queue below
+    // targets THIS worker's base, and the history item records the worker's
+    // NAME so the status/output routes follow the job to the same box.
+    const worker: FleetWorker = await pickWorker(
+      resolveWorkerForLane(modelProfile.kind ?? "ltx"),
+    );
+    const comfyBase = worker.comfyBase as string;
+    console.log(
+      `[FrameForge] Dispatch worker: ${worker.name} (${comfyBase}) for kind=${modelProfile.kind ?? "ltx"}, model=${modelProfile.id}`,
+    );
+
+    // ------------------------------------------------------------------
+    // Upload deferred input images to the CHOSEN worker
+    // ------------------------------------------------------------------
+    if (startSource) {
+      const uploaded = await uploadInputImage(
+        comfyBase,
+        startSource.buffer,
+        startSource.filename,
+        `jobs/${id}`,
+      );
+      imageName = uploaded.imageRef;
+      console.log(`[FrameForge] Uploaded start image → ${imageName}`);
+    }
+    if (endSource) {
+      const uploaded = await uploadInputImage(
+        comfyBase,
+        endSource.buffer,
+        endSource.filename,
+        `jobs/${id}`,
+      );
+      endImageName = uploaded.imageRef;
+      console.log(`[FrameForge] Uploaded end image → ${endImageName}`);
+    }
+
+    // ------------------------------------------------------------------
     // LIP-SYNC prerequisites (ltx23-lipsync via model/profile/laneKey)
     // ------------------------------------------------------------------
     // The lane requires BOTH a presenter still and a voiceover; check here
-    // (before resolveVideoModelId) so a missing image answers a clear 400
+    // (before any dispatch work, keyed on requestedModel — model resolution
+    // itself already ran above) so a missing image answers a clear 400
     // instead of silently falling back to the text-only default. The audio
     // is fetched + duration-probed server-side because the frame count
     // derives from the VO length (audio decides duration; body.duration is
@@ -489,6 +646,7 @@ export async function POST(request: NextRequest) {
         );
       }
       const uploadedAudio = await uploadInputAudio(
+        comfyBase,
         audioSource.buffer,
         audioSource.filename,
         `jobs/${id}`,
@@ -508,7 +666,7 @@ export async function POST(request: NextRequest) {
     // ------------------------------------------------------------------
     // VACE prerequisites (vace-ref / vace-ref-draft / vace-inpaint)
     // ------------------------------------------------------------------
-    // Checked BEFORE resolveVideoModelId, like the LIP-SYNC block above, so
+    // Checked BEFORE any dispatch work, like the LIP-SYNC block above, so
     // a missing input answers a clear 400 instead of silently falling back
     // to a default lane.
     const wantsVaceRef =
@@ -590,6 +748,7 @@ export async function POST(request: NextRequest) {
 
     if (wantsVaceEdit || wantsMatte) {
       const videoSource = await resolveVideoRef(
+        comfyBase,
         { url: body.videoUrl, path: body.videoPath, ref: body.video },
         "clip",
         `jobs/${id}`,
@@ -607,6 +766,7 @@ export async function POST(request: NextRequest) {
       }
       maskName = (
         await resolveVideoRef(
+          comfyBase,
           { url: body.maskUrl, path: body.maskPath, ref: body.mask },
           "mask",
           `jobs/${id}`,
@@ -653,7 +813,7 @@ export async function POST(request: NextRequest) {
       if (wantsMatte) {
         const headBytes =
           videoSource?.bytes ??
-          (await getFileHeadBytes(videoName, VIDEO_PROBE_HEAD_BYTES));
+          (await getFileHeadBytes(comfyBase, videoName, VIDEO_PROBE_HEAD_BYTES));
         if (headBytes) {
           try {
             matteProbe = probeVideoHeader(headBytes);
@@ -728,6 +888,7 @@ export async function POST(request: NextRequest) {
         );
       }
       const videoSource = await resolveVideoRef(
+        comfyBase,
         { url: body.videoUrl, path: body.videoPath, ref: body.video },
         "clip",
         `jobs/${id}`,
@@ -754,7 +915,7 @@ export async function POST(request: NextRequest) {
       // clips answer an honest 400 instead of a silent truncation.
       const headBytes =
         videoSource?.bytes ??
-        (await getFileHeadBytes(videoName, VIDEO_PROBE_HEAD_BYTES));
+        (await getFileHeadBytes(comfyBase, videoName, VIDEO_PROBE_HEAD_BYTES));
       if (headBytes) {
         try {
           foleyProbe = probeVideoHeader(headBytes);
@@ -802,7 +963,7 @@ export async function POST(request: NextRequest) {
     // ------------------------------------------------------------------
     // MUSIC prerequisites (music-bed / music-bed-draft via model/laneKey)
     // ------------------------------------------------------------------
-    // Checked BEFORE resolveVideoModelId like the lanes above so a bad
+    // Checked BEFORE any dispatch work like the lanes above so a bad
     // request answers a clear 400 before any dispatch work. The lane
     // GENERATES audio — no audioUrl-style inputs; the prompt is the style
     // tags (required by the generic guard at the top), `lyrics` is the one
@@ -857,126 +1018,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    let modelId = resolveVideoModelId(requestedModel, hasImage);
-    if (hasImage && endImageName) {
-      // End frame present → FLF2V template unless an explicit Wan profile
-      // already supports it. The fun-camera lane is exempt: an explicit
-      // camera-move request must not be silently rerouted (the end image is
-      // ignored there instead).
-      const candidate = getVideoModelProfile(modelId);
-      if (
-        candidate.kind === "wan-i2v" &&
-        !candidate.supportsEndImage &&
-        candidate.id !== "wan22-camera"
-      ) {
-        modelId = "wan22-flf2v";
-      }
-    }
-    const modelProfile = getVideoModelProfile(modelId);
-
-    // ------------------------------------------------------------------
-    // Remotion MG-TYPE lane (motion graphics — proxied to think)
-    // ------------------------------------------------------------------
-    // Explicit selection only (model "mg-type" or laneKey "MG-TYPE"). NOT a
-    // ComfyUI dispatch: composition + props are validated here, then POSTed
-    // to the think render service (192.168.4.200:3070) and tracked via the
-    // history item's remoteJobId (kind "remotion" — the status route polls
-    // think instead of ComfyUI history). Sits BEFORE the VRAM sweep on
-    // purpose: a CPU render on another machine must not evict models on the
-    // ComfyUI box. Stray imageUrl is ignored (kind "remotion" is exempt from
-    // the image reroute); prompt is optional (the props ARE the content).
-    if (modelProfile.kind === "remotion") {
-      const compositionRaw =
-        typeof body.composition === "string" ? body.composition.trim() : "";
-      const composition = compositionRaw
-        ? getRemotionComposition(compositionRaw)
-        : undefined;
-      if (!composition) {
-        return NextResponse.json(
-          {
-            error:
-              (compositionRaw
-                ? `Unknown composition "${compositionRaw}" for the MG-TYPE lane`
-                : "The MG-TYPE lane requires a composition") +
-              ` — valid compositions: ${REMOTION_COMPOSITION_IDS.join(", ")}` +
-              " (live catalog: GET /health on the think render service)",
-            compositions: REMOTION_COMPOSITION_IDS,
-          },
-          { status: 400 },
-        );
-      }
-
-      const built = buildRemotionProps(composition, body);
-      if ("error" in built) {
-        return NextResponse.json({ error: built.error }, { status: 400 });
-      }
-
-      let remote: { jobId: string };
-      try {
-        remote = await createRemotionRender(
-          composition.id,
-          built.props,
-          typeof body.seed === "number" ? body.seed : undefined,
-        );
-      } catch (error) {
-        if (error instanceof RemotionServiceUnreachableError) {
-          // The one lane whose executor lives on another box: answer an
-          // honest 503 with the restart runbook instead of a generic 500.
-          return NextResponse.json({ error: error.message }, { status: 503 });
-        }
-        // The service answered but rejected the job (its own 400 copy —
-        // e.g. a prop the hardcoded mirror doesn't know about yet).
-        const message =
-          error instanceof Error ? error.message : "Remotion dispatch failed";
-        return NextResponse.json(
-          { error: message },
-          { status: message.includes("(400)") ? 400 : 502 },
-        );
-      }
-
-      const item: VideoGenerationItem = {
-        id,
-        status: "processing",
-        // History display: the composition props are the content.
-        prompt:
-          prompt.trim() ||
-          `${composition.id}: ${built.props.title ?? ""} — ${built.props.subtitle ?? ""}`,
-        kind: "remotion",
-        remoteJobId: remote.jobId,
-        width: composition.width,
-        height: composition.height,
-        fps: composition.fps,
-        frames: composition.durationInFrames,
-        duration: composition.durationInFrames / composition.fps,
-        resolution: `${composition.width}x${composition.height}`,
-        seed: typeof body.seed === "number" ? body.seed : undefined,
-        model: modelProfile.id,
-        modelName: modelProfile.name,
-        createdAt: new Date().toISOString(),
-        progress: 0,
-      };
-
-      await addToHistory(item);
-      console.log(
-        `[FrameForge] MG-TYPE dispatched to think: ${composition.id} (remote job ${remote.jobId})`,
-      );
-
-      return NextResponse.json({
-        id,
-        // No ComfyUI prompt / websocket for the remotion lane; keep the
-        // public response shape uniform (the LTX Desktop sidecar precedent).
-        comfyPromptId: "",
-        clientId: "",
-        status: "processing",
-      });
-    }
-
-    // Free VRAM before any video dispatch: ComfyUI model unload (best-effort)
-    // + the existing Ollama eviction.
+    // Free VRAM before any video dispatch: ComfyUI model unload on the
+    // CHOSEN worker only (best-effort) + the existing app-box Ollama
+    // eviction. Never sweep boxes the job will not run on.
     console.log(
-      `[FrameForge] Pre-dispatch VRAM sweep (lane=${modelProfile.kind ?? "ltx"}, model=${modelProfile.id})`,
+      `[FrameForge] Pre-dispatch VRAM sweep (worker=${worker.name}, lane=${modelProfile.kind ?? "ltx"}, model=${modelProfile.id})`,
     );
-    await Promise.all([freeComfyMemory(), unloadOllamaModels()]);
+    await Promise.all([freeComfyMemory(comfyBase), unloadOllamaModels()]);
 
     const req: GenerateRequest = {
       prompt,
@@ -1019,6 +1067,9 @@ export async function POST(request: NextRequest) {
         seed: req.seed,
         model: modelProfile.id,
         modelName: modelProfile.name,
+        // No `worker` stamp: the sidecar renders outside ComfyUI (the fleet
+        // worker was only VRAM-swept); the status route's ltx-desktop paths
+        // never consult item.worker.
         createdAt: new Date().toISOString(),
         progress: 0,
         sourceImageUrl: req.sourceImage,
@@ -1068,6 +1119,7 @@ export async function POST(request: NextRequest) {
 
       const clientId = uuidv4();
       const comfyResponse = await queuePrompt(
+        comfyBase,
         workflow.prompt as unknown as Record<string, unknown>,
         clientId,
       );
@@ -1086,6 +1138,7 @@ export async function POST(request: NextRequest) {
         seed,
         model: modelProfile.id,
         modelName: modelProfile.name,
+        worker: worker.name,
         createdAt: new Date().toISOString(),
         progress: 0,
         stage: "main",
@@ -1129,6 +1182,7 @@ export async function POST(request: NextRequest) {
 
       const clientId = uuidv4();
       const comfyResponse = await queuePrompt(
+        comfyBase,
         workflow.prompt as unknown as Record<string, unknown>,
         clientId,
       );
@@ -1150,6 +1204,7 @@ export async function POST(request: NextRequest) {
         seed,
         model: modelProfile.id,
         modelName: modelProfile.name,
+        worker: worker.name,
         createdAt: new Date().toISOString(),
         progress: 0,
         stage: "main",
@@ -1213,6 +1268,7 @@ export async function POST(request: NextRequest) {
 
       const clientId = uuidv4();
       const comfyResponse = await queuePrompt(
+        comfyBase,
         workflow.prompt as unknown as Record<string, unknown>,
         clientId,
       );
@@ -1239,6 +1295,7 @@ export async function POST(request: NextRequest) {
             : "source",
         model: modelProfile.id,
         modelName: modelProfile.name,
+        worker: worker.name,
         createdAt: new Date().toISOString(),
         sourceVideoUrl:
           typeof body.videoUrl === "string" && body.videoUrl
@@ -1314,6 +1371,7 @@ export async function POST(request: NextRequest) {
 
       const clientId = uuidv4();
       const comfyResponse = await queuePrompt(
+        comfyBase,
         workflow.prompt as unknown as Record<string, unknown>,
         clientId,
       );
@@ -1338,6 +1396,7 @@ export async function POST(request: NextRequest) {
         seed,
         model: modelProfile.id,
         modelName: modelProfile.name,
+        worker: worker.name,
         createdAt: new Date().toISOString(),
         sourceVideoUrl:
           typeof body.videoUrl === "string" && body.videoUrl
@@ -1398,6 +1457,7 @@ export async function POST(request: NextRequest) {
 
       const clientId = uuidv4();
       const comfyResponse = await queuePrompt(
+        comfyBase,
         workflow.prompt as unknown as Record<string, unknown>,
         clientId,
       );
@@ -1416,6 +1476,7 @@ export async function POST(request: NextRequest) {
         seed,
         model: modelProfile.id,
         modelName: modelProfile.name,
+        worker: worker.name,
         createdAt: new Date().toISOString(),
         sourceImageUrl: modelProfile.requiresImage
           ? typeof body.imageUrl === "string" && body.imageUrl
@@ -1514,6 +1575,7 @@ export async function POST(request: NextRequest) {
 
       const clientId = uuidv4();
       const comfyResponse = await queuePrompt(
+        comfyBase,
         workflow.prompt as unknown as Record<string, unknown>,
         clientId,
       );
@@ -1532,6 +1594,7 @@ export async function POST(request: NextRequest) {
         seed,
         model: modelProfile.id,
         modelName: modelProfile.name,
+        worker: worker.name,
         createdAt: new Date().toISOString(),
         sourceImageUrl: !isEdit
           ? typeof body.imageUrl === "string" && body.imageUrl
@@ -1613,6 +1676,7 @@ export async function POST(request: NextRequest) {
 
       const clientId = uuidv4();
       const comfyResponse = await queuePrompt(
+        comfyBase,
         workflow.prompt as unknown as Record<string, unknown>,
         clientId,
       );
@@ -1631,6 +1695,7 @@ export async function POST(request: NextRequest) {
         seed,
         model: modelProfile.id,
         modelName: modelProfile.name,
+        worker: worker.name,
         createdAt: new Date().toISOString(),
         sourceImageUrl:
           typeof body.imageUrl === "string" && body.imageUrl
@@ -1697,6 +1762,7 @@ export async function POST(request: NextRequest) {
 
       const clientId = uuidv4();
       const comfyResponse = await queuePrompt(
+        comfyBase,
         workflow.prompt as unknown as Record<string, unknown>,
         clientId,
       );
@@ -1715,6 +1781,7 @@ export async function POST(request: NextRequest) {
         seed,
         model: modelProfile.id,
         modelName: modelProfile.name,
+        worker: worker.name,
         createdAt: new Date().toISOString(),
         sourceImageUrl:
           typeof body.imageUrl === "string" && body.imageUrl
@@ -1776,6 +1843,7 @@ export async function POST(request: NextRequest) {
 
       const clientId = uuidv4();
       const comfyResponse = await queuePrompt(
+        comfyBase,
         workflow.prompt as unknown as Record<string, unknown>,
         clientId,
       );
@@ -1794,6 +1862,7 @@ export async function POST(request: NextRequest) {
         seed,
         model: modelProfile.id,
         modelName: modelProfile.name,
+        worker: worker.name,
         createdAt: new Date().toISOString(),
         sourceImageUrl:
           typeof body.imageUrl === "string" && body.imageUrl
@@ -1822,7 +1891,7 @@ export async function POST(request: NextRequest) {
       : buildTextToVideoWorkflow(req);
 
     // Queue to ComfyUI
-    const comfyResponse = await queuePrompt(workflow.prompt as Record<string, unknown>, clientId);
+    const comfyResponse = await queuePrompt(comfyBase, workflow.prompt as Record<string, unknown>, clientId);
 
     // Record the grid-snapped frame count actually queued (8n+1 for LTX),
     // not the raw fps*duration+1 value.
@@ -1847,6 +1916,7 @@ export async function POST(request: NextRequest) {
       seed: (workflow.extra_data as { seed: number }).seed,
       model: modelProfile.id,
       modelName: modelProfile.name,
+      worker: worker.name,
       createdAt: new Date().toISOString(),
       sourceImageUrl: req.sourceImage,
       progress: 0,

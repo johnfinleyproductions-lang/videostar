@@ -13,6 +13,9 @@
 //   tier?: "review" | "hero";   // default "review"
 //   fps?: number;         // MUST match the input clip's fps; default 32
 //                         // (RIFE'd Wan finals; raw Wan = 16, LTX Flash = 24)
+//   worker?: string;      // fleet worker NAME whose output dir holds the
+//                         // clip (default: the default worker — pre-fleet
+//                         // behavior; the upscale runs on that same worker)
 // }
 //
 // Contract (same shape as /api/generate): returns
@@ -30,6 +33,7 @@ import {
   unloadOllamaModels,
 } from "@/lib/comfyui-client";
 import { addToHistory } from "@/lib/history";
+import { getEnabledWorkers, getWorker } from "@/lib/fleet";
 import { loadTemplate, patchByTitle } from "@/lib/workflow-builder";
 import type { ComfyWorkflow, VideoGenerationItem } from "@/lib/types";
 
@@ -145,6 +149,33 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Fleet worker whose OUTPUT DIR holds the input clip — the finisher must
+    // run there (the annotated "[output]" path is box-local). Omitted =
+    // default worker (pre-fleet behavior, and where all legacy renders
+    // live). An explicit unknown name is a caller error, not a fallback.
+    let workerName: string | undefined;
+    if (body.worker !== undefined) {
+      if (typeof body.worker !== "string" || !body.worker.trim()) {
+        return NextResponse.json(
+          { error: "worker must be a fleet worker name (e.g. \"vidbox\")" },
+          { status: 400 },
+        );
+      }
+      workerName = body.worker.trim();
+      if (!getEnabledWorkers().some((w) => w.name === workerName)) {
+        return NextResponse.json(
+          {
+            error:
+              `Unknown/disabled worker "${workerName}" — enabled workers: ` +
+              getEnabledWorkers().map((w) => w.name).join(", "),
+          },
+          { status: 400 },
+        );
+      }
+    }
+    const worker = getWorker(workerName);
+    const comfyBase = worker.comfyBase as string;
+
     // ------------------------------------------------------------------
     // Build the workflow from the tier template
     // ------------------------------------------------------------------
@@ -166,12 +197,13 @@ export async function POST(request: NextRequest) {
     // Dispatch (same VRAM sweep as every other video dispatch)
     // ------------------------------------------------------------------
     console.log(
-      `[FrameForge] Pre-dispatch VRAM sweep (lane=finish-${tier}, job=${id})`,
+      `[FrameForge] Pre-dispatch VRAM sweep (worker=${worker.name}, lane=finish-${tier}, job=${id})`,
     );
-    await Promise.all([freeComfyMemory(), unloadOllamaModels()]);
+    await Promise.all([freeComfyMemory(comfyBase), unloadOllamaModels()]);
 
     const clientId = uuidv4();
     const comfyResponse = await queuePrompt(
+      comfyBase,
       workflow as unknown as Record<string, unknown>,
       clientId,
     );
@@ -200,6 +232,7 @@ export async function POST(request: NextRequest) {
       resolution: tier === "hero" ? "SeedVR2 1080p" : "FlashVSR 2x",
       model: `finish-${tier}`,
       modelName: config.modelName,
+      worker: worker.name,
       createdAt: new Date().toISOString(),
       sourceImageUrl: undefined,
       progress: 0,

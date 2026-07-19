@@ -1,9 +1,13 @@
-// GET /api/ws?clientId=... — SSE proxy for ComfyUI WebSocket progress
-// Since Next.js can't natively do WebSocket upgrades, we use SSE (Server-Sent Events)
-// The frontend connects here and receives real-time progress from ComfyUI's WS
+// GET /api/ws?clientId=...[&worker=<name>] — SSE proxy for ComfyUI WebSocket
+// progress. Since Next.js can't natively do WebSocket upgrades, we use SSE
+// (Server-Sent Events): the frontend connects here and receives real-time
+// progress from the fleet worker's ComfyUI WS. worker omitted = the default
+// worker, whose ws base is COMFYUI_WS_URL || derived from COMFYUI_URL —
+// exactly the pre-fleet single-base behavior.
 
 import { NextRequest } from "next/server";
 import WebSocket from "ws";
+import { getWorker, getWorkerWsBase } from "@/lib/fleet";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -16,8 +20,7 @@ export async function GET(request: NextRequest) {
     return new Response("clientId required", { status: 400 });
   }
 
-  const comfyWsUrl =
-    process.env.COMFYUI_WS_URL || "ws://127.0.0.1:8188/ws";
+  const comfyWsUrl = getWorkerWsBase(getWorker(searchParams.get("worker")));
 
   const encoder = new TextEncoder();
   let wsConnection: WebSocket | null = null;
