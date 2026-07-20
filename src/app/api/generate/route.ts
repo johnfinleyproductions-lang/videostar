@@ -367,6 +367,24 @@ export async function POST(request: NextRequest) {
     if (!startSource && typeof body.sourceImage === "string" && body.sourceImage) {
       imageName = body.sourceImage;
     }
+    // Forgiving alias: `image` / `startImage` / `inputImage` are the intuitive
+    // (and previously silent-failing) ways to name an already-uploaded input
+    // frame. Accept a bare string filename OR the { filename } shape that
+    // /api/upload returns, mapping to sourceImage — an I2V request must never
+    // be quietly rerouted to the no-image LTX lane because the field was named
+    // slightly wrong.
+    if (!startSource && !imageName) {
+      const alias = body.image ?? body.startImage ?? body.inputImage;
+      if (typeof alias === "string" && alias.trim()) {
+        imageName = alias.trim();
+      } else if (
+        alias &&
+        typeof alias === "object" &&
+        typeof (alias as { filename?: unknown }).filename === "string"
+      ) {
+        imageName = (alias as { filename: string }).filename;
+      }
+    }
 
     const endSource = wantsRemotion
       ? null
@@ -388,6 +406,24 @@ export async function POST(request: NextRequest) {
     // Presence-based: a resolved-but-not-yet-uploaded buffer counts exactly
     // like the pre-fleet uploaded ref did.
     const hasImage = Boolean(startSource) || Boolean(imageName);
+    // If the caller clearly meant to send a start image but nothing resolved,
+    // say so loudly instead of silently producing a text-to-video clip.
+    if (!hasImage) {
+      const strayImageKey = [
+        "image",
+        "startImage",
+        "inputImage",
+        "imageUrl",
+        "imageBase64",
+        "imagePath",
+        "sourceImage",
+      ].find((key) => body[key] != null);
+      if (strayImageKey) {
+        console.warn(
+          `[FrameForge] request carried '${strayImageKey}' but no usable input image resolved — routing WITHOUT an image (text-to-video). For I2V pass imageUrl, imageBase64, imagePath, or an uploaded sourceImage/image filename.`,
+        );
+      }
+    }
     let requestedModel: string | undefined = body.model || body.profile;
 
     // Optional laneKey (additive; see GET /api/lanes). An explicit model
