@@ -161,9 +161,18 @@ export async function getFluxPreflight(
   missing: string[];
   comfyuiUrl: string;
 }> {
-  const res = await fetch(`${base}/object_info`, {
-    cache: "no-store",
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${base}/object_info`, {
+      cache: "no-store",
+    });
+  } catch {
+    return {
+      ok: false,
+      missing: [`ComfyUI unreachable at ${base}`],
+      comfyuiUrl: base,
+    };
+  }
   if (!res.ok) {
     return {
       ok: false,
