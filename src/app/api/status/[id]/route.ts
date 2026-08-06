@@ -18,6 +18,7 @@ import {
   type ComfyUIHistoryItem,
 } from "@/lib/comfyui-client";
 import { getHistoryItem, updateHistoryItem } from "@/lib/history";
+import { getDefaultWorker, getWorkerComfyBase } from "@/lib/fleet";
 import {
   getRemotionJob,
   REMOTION_SERVICE_DOWN_MESSAGE,
@@ -40,10 +41,24 @@ function getAppUrl(): string {
   return process.env.NEXT_PUBLIC_APP_URL || "http://192.168.4.176:3060";
 }
 
-function buildOutputUrl(output: { filename: string; subfolder: string }): string {
-  return `${getAppUrl()}/api/output?filename=${encodeURIComponent(
-    output.filename,
-  )}&subfolder=${encodeURIComponent(output.subfolder)}`;
+/**
+ * Build the public /api/output proxy URL for a finished file. When the job
+ * ran on a NON-default fleet worker its name is carried as a &worker= param
+ * so the output route proxies the right box; default-worker jobs (and all
+ * legacy history) keep the exact pre-fleet URL shape — byte-identical while
+ * only vidbox is enabled.
+ */
+function buildOutputUrl(
+  output: { filename: string; subfolder: string },
+  workerName?: string,
+): string {
+  const url =
+    `${getAppUrl()}/api/output?filename=${encodeURIComponent(output.filename)}` +
+    `&subfolder=${encodeURIComponent(output.subfolder)}`;
+  if (workerName && workerName !== getDefaultWorker().name) {
+    return `${url}&worker=${encodeURIComponent(workerName)}`;
+  }
+  return url;
 }
 
 /** History error signal ("error" status_str, or completed with no files). */
@@ -132,7 +147,10 @@ export async function GET(
     // ------------------------------------------------------------------
     // Main generation stage
     // ------------------------------------------------------------------
-    const comfyHistory = await getHistory(item.comfyPromptId);
+    // Poll the worker the job was DISPATCHED to (missing worker field =
+    // legacy history = the default worker; see src/lib/fleet.ts).
+    const comfyBase = getWorkerComfyBase(item.worker);
+    const comfyHistory = await getHistory(comfyBase, item.comfyPromptId);
 
     if (!comfyHistory) {
       // prompt_id key absent from /history → still queued or executing.
@@ -178,7 +196,7 @@ export async function GET(
         (profile.kind === "wan-i2v" || profile.kind === "wan-vace") &&
         item.kind !== "finish"
       ) {
-        const stageOneUrl = buildOutputUrl(output);
+        const stageOneUrl = buildOutputUrl(output, item.worker);
         const postPromptId = await submitPostJob(item, output);
 
         if (postPromptId) {
@@ -217,7 +235,7 @@ export async function GET(
       }
 
       // Non-Wan lanes complete directly.
-      const videoUrl = buildOutputUrl(output);
+      const videoUrl = buildOutputUrl(output, item.worker);
       await updateHistoryItem(id, {
         status: "completed",
         url: videoUrl,
@@ -350,12 +368,17 @@ async function checkRemotionJob(id: string, item: VideoGenerationItem) {
  * Submit the RIFE interpolation post job for a finished Wan stage-1 clip.
  * Returns the new ComfyUI prompt id, or null when submission failed (the
  * caller degrades gracefully to the stage-1 output).
+ *
+ * The post job MUST run on the SAME fleet worker as stage 1 — the annotated
+ * "[output]" path points into THAT box's output directory (no failover here
+ * by design; a down worker degrades gracefully to the stage-1 clip).
  */
 async function submitPostJob(
   item: VideoGenerationItem,
   stageOneOutput: { filename: string; subfolder: string },
 ): Promise<string | null> {
   try {
+    const comfyBase = getWorkerComfyBase(item.worker);
     const template = loadTemplate(POST_TEMPLATE_FILE);
     const workflow = JSON.parse(JSON.stringify(template)) as ComfyWorkflow;
 
@@ -372,14 +395,16 @@ async function submitPostJob(
     // Keep final outputs under video/wan/, one file family per public job id.
     save.node.inputs.filename_prefix = `video/wan/final-${item.id}`;
 
-    // Free the Wan experts before the RIFE pass (best-effort) + keep the
-    // Ollama eviction, same as any other video dispatch.
+    // Free the Wan experts before the RIFE pass (best-effort, on the job's
+    // OWN worker only) + keep the Ollama eviction, same as any other video
+    // dispatch.
     console.log(
       `[FrameForge] Pre-dispatch VRAM sweep (lane=post-rife, job=${item.id})`,
     );
-    await Promise.all([freeComfyMemory(), unloadOllamaModels()]);
+    await Promise.all([freeComfyMemory(comfyBase), unloadOllamaModels()]);
 
     const response = await queuePrompt(
+      comfyBase,
       workflow as unknown as Record<string, unknown>,
       randomUUID(),
     );
@@ -396,10 +421,10 @@ async function submitPostJob(
   }
 }
 
-/** Poll the RIFE post job; finish, degrade, or keep processing. */
+/** Poll the RIFE post job (on the job's own worker); finish, degrade, or keep processing. */
 async function checkPostStage(id: string, item: VideoGenerationItem) {
   const postHistory = item.postPromptId
-    ? await getHistory(item.postPromptId)
+    ? await getHistory(getWorkerComfyBase(item.worker), item.postPromptId)
     : null;
 
   if (!postHistory) {
@@ -413,7 +438,7 @@ async function checkPostStage(id: string, item: VideoGenerationItem) {
   const output = extractOutputFilename(postHistory);
 
   if (output) {
-    const videoUrl = buildOutputUrl(output);
+    const videoUrl = buildOutputUrl(output, item.worker);
     await updateHistoryItem(id, {
       status: "completed",
       url: videoUrl,

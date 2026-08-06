@@ -2,7 +2,7 @@
   "1": {
     "class_type": "UNETLoader",
     "inputs": {
-      "unet_name": "acestep_v1.5_turbo.safetensors",
+      "unet_name": "acestep_v1.5_xl_turbo_bf16.safetensors",
       "weight_dtype": "default"
     },
     "_meta": {

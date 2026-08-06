@@ -303,7 +303,9 @@ function applyTitlePatches(
  * "FF Wan Video" (WanCameraImageToVideo) receives them via links from the
  * camera node and must NOT be patched, or the camera trajectory length would
  * desync from the latent. Plain I2V/FLF2V templates have no camera node and
- * are patched on "FF Wan Video" exactly as before.
+ * are patched on "FF Wan Video" exactly as before. Caller width/height are
+ * optional (template default when omitted) and are snapped to the 16px
+ * latent grid both nodes require (e.g. 1080x1920 → 1088x1920).
  *
  * Samplers: S1 is required (it adds the noise). S2/S3 are patched when
  * present — the 3-sampler distill recipe has all three, the fun-camera recipe
@@ -340,8 +342,15 @@ export function buildWanI2V(params: WanI2VBuildParams): {
 
   const legalLength = validateFrameGrid(length, "wan");
   const sizePatch: Record<string, unknown> = { length: legalLength };
-  if (typeof width === "number" && width > 0) sizePatch.width = width;
-  if (typeof height === "number" && height > 0) sizePatch.height = height;
+  // Wan latent nodes (WanImageToVideo / WanCameraEmbedding) require
+  // width/height on the 16px grid — snap like the VACE lane does
+  // (e.g. 1080 → 1088, nearest multiple of 16).
+  if (typeof width === "number" && width > 0) {
+    sizePatch.width = snapToLatentGrid(width);
+  }
+  if (typeof height === "number" && height > 0) {
+    sizePatch.height = snapToLatentGrid(height);
+  }
 
   const seedPatch = { noise_seed: seed };
 
@@ -390,7 +399,14 @@ export function buildWanI2V(params: WanI2VBuildParams): {
 
   return {
     prompt: workflow,
-    extra_data: { seed, length: legalLength, width, height },
+    extra_data: {
+      seed,
+      length: legalLength,
+      // Report the SNAPPED size actually patched into the graph (matching
+      // applyVaceCommonPatches) so history/resolution metadata stays honest.
+      width: sizePatch.width as number | undefined,
+      height: sizePatch.height as number | undefined,
+    },
   };
 }
 
@@ -616,7 +632,11 @@ export const WAN_ALPHA_TEMPLATE_TITLES = {
   output: "FF Output",
 } as const;
 
-/** EmptyHunyuanLatentVideo requires width/height on a 16px grid. */
+/**
+ * Wan-family latent nodes (WanImageToVideo / WanCameraEmbedding /
+ * WanVaceToVideo / EmptyHunyuanLatentVideo) require width/height on a 16px
+ * grid — nearest multiple, so 1080 → 1088.
+ */
 function snapToLatentGrid(value: number): number {
   return Math.max(16, Math.round(value / 16) * 16);
 }
@@ -1321,6 +1341,134 @@ export function buildHv15(params: Hv15BuildParams): {
 }
 
 // ---------------------------------------------------------------------------
+// MiniMax-H3 template lane (omni AV — video + native stereo audio, sidecar)
+// ---------------------------------------------------------------------------
+
+/**
+ * Node titles the MiniMax-H3 template must carry (src/workflows/minimax_h3.json).
+ * The prompt lives INLINE on the MiniMaxH3ImageToVideo node (no CLIPTextEncode
+ * pair — H3 is guider-only with no negative), so one title carries prompt AND
+ * size AND length.
+ */
+export const H3_TEMPLATE_TITLES = {
+  /** MiniMaxH3ImageToVideo — prompt/width/height/length carrier. */
+  video: "FF H3 Video",
+  /** RandomNoise — seed input is `noise_seed`. */
+  seed: "FF Seed",
+  output: "FF Output",
+} as const;
+
+/**
+ * MiniMax-H3 frame grid: length must satisfy `f % 17 === 5` with a floor of 5
+ * (the node itself snaps UP with `while n % 17 != 5: n += 1` — mirrored here
+ * so the reported duration matches what the box actually renders). 124 ≈ 5.2s
+ * @ 24fps; the trained range is ~124–362 frames.
+ */
+export function validateH3FrameGrid(frames: number): number {
+  let f = Number.isFinite(frames) ? Math.max(5, Math.round(frames)) : 124;
+  while (f % 17 !== 5) f++;
+  return f;
+}
+
+export interface MiniMaxH3BuildParams {
+  template: ComfyWorkflow;
+  prompt: string;
+  /** Uploaded ComfyUI input ref for the (optional) first-frame still. */
+  imageName?: string;
+  /** Uploaded ComfyUI input ref for the (optional) last-frame still (fl2va). */
+  endImageName?: string;
+  length: number;
+  seed: number;
+  width?: number;
+  height?: number;
+}
+
+/**
+ * Build the MiniMax-H3 omni-AV graph by patching the loaded template. The
+ * recipe (20 steps simple, res_multistep, BasicGuider — no CFG/negative, dual
+ * video+audio VAE decode into one CreateVideo) is template-locked; only the
+ * prompt, size/length, seed, and the optional first/last keyframe stills are
+ * patched here.
+ *
+ * Keyframes: the template ships with NO LoadImage nodes (pure t2va). When a
+ * start (and/or end) image arrives, LoadImage nodes are ADDED and wired into
+ * the node's optional `first_frame` / `last_frame` inputs — the same graph
+ * surgery idiom as buildVaceInpaint's still-mask path.
+ *
+ * Canvas: H3's native canvas is a 768px short edge capped at 768x1344 area,
+ * 32px multiples (native 16:9 = 1344x768). Requested sizes snap to the 32px
+ * grid; staying inside the trained canvas is the caller's job (the profile
+ * defaults are native).
+ */
+export function buildMiniMaxH3(params: MiniMaxH3BuildParams): {
+  prompt: ComfyWorkflow;
+  extra_data: {
+    seed: number;
+    length: number;
+    width?: number;
+    height?: number;
+  };
+} {
+  const { template, prompt, imageName, endImageName, length, seed, width, height } =
+    params;
+
+  // Deep-clone so the cached/loaded template is never mutated.
+  const workflow = JSON.parse(JSON.stringify(template)) as ComfyWorkflow;
+
+  const legalLength = validateH3FrameGrid(length);
+  const snap32 = (value: number) => Math.max(32, Math.round(value / 32) * 32);
+
+  const videoPatch: Record<string, unknown> = {
+    prompt,
+    length: legalLength,
+  };
+  if (typeof width === "number" && width > 0) videoPatch.width = snap32(width);
+  if (typeof height === "number" && height > 0) {
+    videoPatch.height = snap32(height);
+  }
+
+  applyTitlePatches(workflow, {
+    [H3_TEMPLATE_TITLES.video]: videoPatch,
+    [H3_TEMPLATE_TITLES.seed]: { noise_seed: seed },
+  });
+
+  // Optional keyframe stills → add LoadImage nodes + wire the optional
+  // first_frame/last_frame inputs (ids chosen clear of the template's 1..14).
+  const videoNode = findNodeByTitle(workflow, H3_TEMPLATE_TITLES.video);
+  if (!videoNode) {
+    throw new Error(
+      `MiniMax-H3 template is missing its "${H3_TEMPLATE_TITLES.video}" node`,
+    );
+  }
+  if (imageName) {
+    workflow["90"] = {
+      class_type: "LoadImage",
+      inputs: { image: imageName },
+      _meta: { title: "FF Start Image" },
+    };
+    videoNode.node.inputs.first_frame = ["90", 0];
+  }
+  if (endImageName) {
+    workflow["91"] = {
+      class_type: "LoadImage",
+      inputs: { image: endImageName },
+      _meta: { title: "FF End Image" },
+    };
+    videoNode.node.inputs.last_frame = ["91", 0];
+  }
+
+  return {
+    prompt: workflow,
+    extra_data: {
+      seed,
+      length: legalLength,
+      width: videoPatch.width as number | undefined,
+      height: videoPatch.height as number | undefined,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // LTX template lane (Flash AV — single-stage distilled, AV latent path)
 // ---------------------------------------------------------------------------
 
@@ -1335,6 +1483,15 @@ export const LTX_TEMPLATE_TITLES = {
   seed: "FF Seed",
   output: "FF Output",
 } as const;
+
+/**
+ * EmptyLTXVLatentVideo requires width/height on a 32px grid (live schema:
+ * step 32, min 64) — nearest multiple, so 1080 → 1088. Shared by every LTX
+ * latent size patch (Flash/Master stage-1 and LIP-SYNC).
+ */
+function snapToLtxGrid(value: number): number {
+  return Math.max(64, Math.round(value / 32) * 32);
+}
 
 /**
  * Build an LTX 2.3 template graph (Flash AV single-stage or Master AV
@@ -1389,20 +1546,18 @@ export function buildLtxTemplate(params: LtxTemplateBuildParams): {
   // (verified per the ltx23_master.json link graph: EmptyLTXVLatentVideo →
   // sampler S1 → LTXVSeparateAVLatent → LTXVLatentUpsampler → S2 chain), so
   // patching the single EmptyLTXVLatentVideo is the complete size patch.
-  // Requested width/height always mean the FINAL output size: with an
-  // upsampler present the stage-1 latent is patched at size/factor (snapped
-  // to the 32px grid EmptyLTXVLatentVideo requires). Single-stage templates
-  // (Flash) have factor 1 and are patched exactly as before.
+  // Requested width/height always mean the FINAL output size: the stage-1
+  // latent is patched at size/factor, snapped to the 32px grid
+  // EmptyLTXVLatentVideo requires. Single-stage templates (Flash) have
+  // factor 1 and get the same snap (e.g. 1080x1920 → 1088x1920), so
+  // off-grid sizes no longer reach the latent node raw.
   const upscaleFactor = Object.values(workflow)
     .filter((node) => node.class_type === "LatentUpscaleModelLoader")
     .reduce((factor, node) => {
       const match = /-x(\d+)-/.exec(String(node.inputs.model_name ?? ""));
       return factor * (match ? Number(match[1]) : 2);
     }, 1);
-  const snapStage1 = (value: number) =>
-    upscaleFactor === 1
-      ? value // Flash path: byte-identical to the proven lane-2 behavior.
-      : Math.max(64, Math.round(value / upscaleFactor / 32) * 32);
+  const snapStage1 = (value: number) => snapToLtxGrid(value / upscaleFactor);
 
   // Latent sizing is patched by CLASS, not title, so recipe variants with
   // differently-titled latent nodes keep working:
@@ -1585,8 +1740,13 @@ export function buildLtxLipsync(params: LtxLipsyncBuildParams): {
     if (node.class_type === "EmptyLTXVLatentVideo") {
       videoLatents++;
       node.inputs.length = legalLength;
-      if (typeof width === "number" && width > 0) node.inputs.width = width;
-      if (typeof height === "number" && height > 0) node.inputs.height = height;
+      // Same 32px grid snap as buildLtxTemplate (e.g. 1080x1920 → 1088x1920).
+      if (typeof width === "number" && width > 0) {
+        node.inputs.width = snapToLtxGrid(width);
+      }
+      if (typeof height === "number" && height > 0) {
+        node.inputs.height = snapToLtxGrid(height);
+      }
     }
   }
   if (videoLatents === 0) {

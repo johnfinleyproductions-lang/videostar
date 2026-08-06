@@ -60,6 +60,7 @@ export type LaneKey =
   | "FOLEY"
   | "MUSIC"
   | "HV-HUMANS"
+  | "MINIMAX-H3"
   | "FINISH-STACK";
 
 /** How a lane is executed. */
@@ -527,6 +528,29 @@ export const LANES: readonly LaneDescriptor[] = [
     supportsAudio: profile("hv15-t2v").includeAudio === true,
     outputFormat: "mp4",
     typicalRenderMinutes: 15,
+  },
+  {
+    // MiniMax-H3: the only lane whose AUDIO is generated in the same forward
+    // pass as the picture — voice, SFX, and score are modeled jointly, not
+    // layered on afterward. Storyboard-style prompts with an explicit
+    // "Audio:" line work best (the model follows audio direction). Runs on
+    // the "vidbox-sidecar" fleet worker (ComfyUI v0.30, port 8190) — the
+    // sidecar process must be up or dispatch falls back to the default box
+    // and fails with an unknown-node error.
+    laneKey: "MINIMAX-H3",
+    title: "MiniMax H3 Omni AV",
+    description:
+      "Video WITH native stereo audio in one pass (voice/SFX/music modeled jointly) — 33B omni model, 1344x768 @ 24fps, ~5-15s on the 17k+5 frame grid. Handles multi-shot storyboard prompts with an Audio: line. Optional start/end stills for keyframing. Explicit selection; needs the v0.30 sidecar running.",
+    kind: "minimax-h3",
+    executor: "generate",
+    endpoint: "/api/generate",
+    modelId: "minimax-h3",
+    requiresImage: false,
+    acceptsImage: true,
+    textOnly: false,
+    supportsAudio: profile("minimax-h3").includeAudio === true,
+    outputFormat: "mp4",
+    typicalRenderMinutes: 8,
   },
   {
     laneKey: "FINISH-STACK",

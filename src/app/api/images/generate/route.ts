@@ -1,7 +1,11 @@
 // POST /api/images/generate - Queue a local image generation.
 
 import { NextRequest, NextResponse } from "next/server";
-import { queueFluxPrompt, getFluxPreflight } from "@/lib/flux-client";
+import {
+  queueFluxPrompt,
+  getFluxPreflight,
+  resolveFluxComfyBase,
+} from "@/lib/flux-client";
 import { buildFluxWorkflow } from "@/lib/flux-workflow-builder";
 import {
   getLensPreflight,
@@ -27,7 +31,7 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  const preflight = await getFluxPreflight(model);
+  const preflight = await getFluxPreflight(resolveFluxComfyBase(), model);
   return NextResponse.json({
     ok: preflight.ok,
     status: preflight.ok ? "ready" : "unavailable",
@@ -105,7 +109,11 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const preflight = await getFluxPreflight(model);
+    // Stills worker: FLUX_COMFYUI_URL override, else the first enabled
+    // "flux-image" fleet worker (deterministic — the stateless images API
+    // must poll the same box it dispatched to; see flux-client.ts).
+    const fluxBase = resolveFluxComfyBase();
+    const preflight = await getFluxPreflight(fluxBase, model);
     if (!preflight.ok) {
       return NextResponse.json(
         {
@@ -131,7 +139,7 @@ export async function POST(request: NextRequest) {
     });
 
     const clientId = `frameforge-${Date.now()}`;
-    const response = await queueFluxPrompt(workflow, clientId);
+    const response = await queueFluxPrompt(fluxBase, workflow, clientId);
 
     return NextResponse.json({
       prompt_id: response.prompt_id,

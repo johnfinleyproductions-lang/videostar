@@ -1,7 +1,12 @@
 // FrameForge — ComfyUI HTTP Client
 // IMPORTANT: Always use 127.0.0.1, NEVER localhost (IPv6 issue on CachyOS)
-
-const COMFYUI_URL = process.env.COMFYUI_URL || "http://127.0.0.1:8188";
+//
+// MULTI-WORKER (2026-07): this module is base-agnostic — every network
+// helper takes the target worker's ComfyUI HTTP base as its FIRST parameter
+// (there is deliberately NO module-level COMFYUI_URL anymore; that global was
+// the single-base chokepoint). Callers resolve the base through
+// src/lib/fleet.ts: pickWorker(resolveWorkerForLane(kind)) at dispatch,
+// getWorkerComfyBase(item.worker) when polling/proxying an existing job.
 
 interface ComfyUIPromptResponse {
   prompt_id: string;
@@ -92,10 +97,11 @@ function formatPromptError(status: number, rawBody: string): string {
 }
 
 export async function queuePrompt(
+  base: string,
   workflow: Record<string, unknown>,
   clientId: string
 ): Promise<ComfyUIPromptResponse> {
-  const res = await fetch(`${COMFYUI_URL}/prompt`, {
+  const res = await fetch(`${base}/prompt`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -113,9 +119,10 @@ export async function queuePrompt(
 }
 
 export async function getHistory(
+  base: string,
   promptId: string
 ): Promise<ComfyUIHistoryItem | null> {
-  const res = await fetch(`${COMFYUI_URL}/history/${promptId}`);
+  const res = await fetch(`${base}/history/${promptId}`);
   if (!res.ok) return null;
 
   const data = await res.json();
@@ -124,15 +131,17 @@ export async function getHistory(
 }
 
 export async function getOutputFile(
+  base: string,
   filename: string,
   subfolder: string = "",
   type: string = "output"
 ): Promise<Response> {
   const params = new URLSearchParams({ filename, subfolder, type });
-  return fetch(`${COMFYUI_URL}/view?${params}`);
+  return fetch(`${base}/view?${params}`);
 }
 
 export async function uploadImage(
+  base: string,
   file: Buffer,
   filename: string
 ): Promise<{ name: string; subfolder: string; type: string }> {
@@ -140,7 +149,7 @@ export async function uploadImage(
   formData.append("image", new Blob([new Uint8Array(file)]), filename);
   formData.append("overwrite", "true");
 
-  const res = await fetch(`${COMFYUI_URL}/upload/image`, {
+  const res = await fetch(`${base}/upload/image`, {
     method: "POST",
     body: formData,
   });
@@ -158,6 +167,7 @@ export async function uploadImage(
  * "subfolder/name" string a LoadImage node expects.
  */
 export async function uploadInputImage(
+  base: string,
   file: Buffer,
   filename: string,
   subfolder: string
@@ -168,7 +178,7 @@ export async function uploadInputImage(
   formData.append("subfolder", subfolder);
   formData.append("overwrite", "true");
 
-  const res = await fetch(`${COMFYUI_URL}/upload/image`, {
+  const res = await fetch(`${base}/upload/image`, {
     method: "POST",
     body: formData,
   });
@@ -204,6 +214,7 @@ export async function uploadInputImage(
  * resolves annotated filepaths exactly like LoadImage).
  */
 export async function uploadInputAudio(
+  base: string,
   file: Buffer,
   filename: string,
   subfolder: string
@@ -214,7 +225,7 @@ export async function uploadInputAudio(
   formData.append("subfolder", subfolder);
   formData.append("overwrite", "true");
 
-  const res = await fetch(`${COMFYUI_URL}/upload/image`, {
+  const res = await fetch(`${base}/upload/image`, {
     method: "POST",
     body: formData,
   });
@@ -252,6 +263,7 @@ export async function uploadInputAudio(
  * both valid values for its `video` input).
  */
 export async function uploadInputVideo(
+  base: string,
   file: Buffer,
   filename: string,
   subfolder: string
@@ -262,7 +274,7 @@ export async function uploadInputVideo(
   formData.append("subfolder", subfolder);
   formData.append("overwrite", "true");
 
-  const res = await fetch(`${COMFYUI_URL}/upload/image`, {
+  const res = await fetch(`${base}/upload/image`, {
     method: "POST",
     body: formData,
   });
@@ -299,6 +311,7 @@ export async function uploadInputVideo(
  * Best-effort: returns null on any failure (callers fall back gracefully).
  */
 export async function getFileHeadBytes(
+  base: string,
   fileRef: string,
   maxBytes: number,
 ): Promise<Buffer | null> {
@@ -312,7 +325,7 @@ export async function getFileHeadBytes(
     if (!filename) return null;
 
     const params = new URLSearchParams({ filename, subfolder, type });
-    const res = await fetch(`${COMFYUI_URL}/view?${params}`, {
+    const res = await fetch(`${base}/view?${params}`, {
       headers: { Range: `bytes=0-${maxBytes - 1}` },
       signal: AbortSignal.timeout(30_000),
     });
@@ -343,8 +356,8 @@ export async function getFileHeadBytes(
   }
 }
 
-export async function getSystemStats(): Promise<Record<string, unknown>> {
-  const res = await fetch(`${COMFYUI_URL}/system_stats`);
+export async function getSystemStats(base: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`${base}/system_stats`);
   if (!res.ok) throw new Error(`System stats failed: ${res.status}`);
   return res.json();
 }
@@ -353,9 +366,9 @@ export async function getSystemStats(): Promise<Record<string, unknown>> {
  * Ask ComfyUI to unload models and free VRAM before a heavy video job.
  * Best-effort: failures are logged and swallowed — never blocks a dispatch.
  */
-export async function freeComfyMemory(): Promise<void> {
+export async function freeComfyMemory(base: string): Promise<void> {
   try {
-    const res = await fetch(`${COMFYUI_URL}/free`, {
+    const res = await fetch(`${base}/free`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: AbortSignal.timeout(10_000),

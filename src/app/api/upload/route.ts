@@ -2,6 +2,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { uploadImage } from "@/lib/comfyui-client";
+import { getWorkerComfyBase } from "@/lib/fleet";
 
 export const dynamic = "force-dynamic";
 
@@ -15,7 +16,10 @@ export async function POST(request: NextRequest) {
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
-    const result = await uploadImage(buffer, file.name);
+    // Legacy pre-upload flow (sourceImage passthrough) — always the DEFAULT
+    // worker: /api/generate treats a bare `sourceImage` filename as living
+    // on the box it dispatches to, and the default worker serves every lane.
+    const result = await uploadImage(getWorkerComfyBase(), buffer, file.name);
 
     return NextResponse.json({
       filename: result.name,

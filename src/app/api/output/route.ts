@@ -1,9 +1,13 @@
-// GET /api/output?filename=...&subfolder=... — Proxy ComfyUI output files
+// GET /api/output?filename=...&subfolder=...[&worker=<name>] — Proxy ComfyUI
+// output files from the fleet worker that rendered them (worker omitted =
+// the default worker — every pre-fleet URL keeps working unchanged; the
+// status route only appends &worker= for NON-default workers).
 // GET /api/output?remotion=<remoteJobId>[&variant=preview] — Proxy MG-TYPE
 // files straight from the think render service (:3070/files/<jobId>).
 
 import { NextRequest, NextResponse } from "next/server";
 import { getOutputFile } from "@/lib/comfyui-client";
+import { getWorkerComfyBase } from "@/lib/fleet";
 import { getLtxDesktopOutputFile } from "@/lib/ltx-desktop-client";
 import {
   fetchRemotionFile,
@@ -94,7 +98,9 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Filename required" }, { status: 400 });
     }
 
-    const comfyResponse = await getOutputFile(filename, subfolder);
+    // Fleet worker that holds the file (missing/unknown → default worker).
+    const comfyBase = getWorkerComfyBase(searchParams.get("worker"));
+    const comfyResponse = await getOutputFile(comfyBase, filename, subfolder);
 
     if (!comfyResponse.ok) {
       return NextResponse.json(

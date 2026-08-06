@@ -53,6 +53,9 @@ export type VideoModelId =
   // (explicit selection only, never a default)
   | "hv15-hero"
   | "hv15-hero-i2v"
+  // MiniMax-H3 omni AV lane (33B fp8 on the v0.30 sidecar worker: video WITH
+  // native stereo audio in one pass; explicit selection only, never a default)
+  | "minimax-h3"
   // LTX template lane (single-stage Flash AV distilled, API-format template)
   | "ltx23-flash"
   // LTX template lane (two-stage Master AV: distilled base + x2 latent
@@ -288,7 +291,7 @@ export const VIDEO_MODEL_PROFILES: VideoModelProfile[] = [
     name: "Wan 2.2 Cinematic I2V",
     shortName: "Wan I2V",
     description:
-      "Default image-to-video: Wan 2.2 14B, 3-sampler MoE distill (lightx2v v1022) recipe, 1280x720 @ 16fps.",
+      "Default image-to-video: Wan 2.2 14B, 3-sampler MoE distill (lightx2v v1022) recipe, 1280x720 default @ 16fps (pass width/height for other sizes, e.g. vertical 9:16 — snapped to the 16px grid, so 1080x1920 → 1088x1920).",
     templateFile: "wan22-i2v.json",
   },
   {
@@ -306,7 +309,7 @@ export const VIDEO_MODEL_PROFILES: VideoModelProfile[] = [
     name: "Wan 2.2 Camera Move",
     shortName: "Wan Camera",
     description:
-      "Camera-move image-to-video: Wan 2.2 fun-camera experts + WanCameraEmbedding pose presets (pan / zoom / orbit), 2-sampler recipe cfg 3.5, 1280x720 @ 16fps. Pass cameraMove (e.g. \"push in\", \"orbit left\", \"Pan Up\").",
+      "Camera-move image-to-video: Wan 2.2 fun-camera experts + WanCameraEmbedding pose presets (pan / zoom / orbit), 2-sampler recipe cfg 3.5, 1280x720 default @ 16fps (width/height overridable, snapped to the 16px grid). Pass cameraMove (e.g. \"push in\", \"orbit left\", \"Pan Up\").",
     templateFile: "wan22_camera.json",
     // Display-only mirrors of the template-locked fun-camera recipe (the
     // camera lane runs the fun_camera UNETs, not the distill-LoRA experts).
@@ -706,6 +709,42 @@ export const VIDEO_MODEL_PROFILES: VideoModelProfile[] = [
     supportsEndImage: false,
   },
   {
+    // MiniMax-H3 — omni-modal AV TEMPLATE lane: video WITH native stereo
+    // 32kHz audio generated in the SAME forward pass (voice/SFX/music are
+    // modeled jointly, not layered on afterward). Runs the 33B pruned fp8
+    // transformer + Qwen3-VL-32B NVFP4 encoder, which only exist on the
+    // ComfyUI v0.30 SIDECAR (fleet worker "vidbox-sidecar", 127.0.0.1:8190)
+    // — the live 0.18.1 box has no MiniMax nodes, so this lane depends on
+    // the sidecar process being up. Recipe is template-locked in
+    // src/workflows/minimax_h3.json (20 steps, res_multistep/simple,
+    // BasicGuider — guider-only, NO CFG, no negative prompt). Frames snap to
+    // the model's 17k+5 grid (124 ≈ 5s @ 24fps; trained range ~124-362).
+    // Canvas: 768px short edge, 768x1344 area cap, 32px multiples — native
+    // 16:9 = 1344x768. Optional start/end stills (fl2va keyframing).
+    // Explicit selection only, never a routing default.
+    id: "minimax-h3",
+    name: "MiniMax H3 Omni AV",
+    shortName: "MiniMax H3",
+    description:
+      "Omni-modal video WITH native stereo audio in one pass (voice/SFX/music modeled jointly): MiniMax-H3 33B pruned fp8, 20 steps guider-only, 1344x768 @ 24fps, frames on the 17k+5 grid (124 ≈ 5s). Optional start/end stills. Runs on the v0.30 sidecar worker. Explicit selection only.",
+    kind: "minimax-h3",
+    backend: "comfyui",
+    templateFile: "minimax_h3.json",
+    // Display-only mirrors of the template-locked recipe values.
+    checkpoint: "minimax_h3_fl2va_pruned_fp8_scaled.safetensors",
+    textEncoder: "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+    steps: 20,
+    videoCfg: 1,
+    audioCfg: 0,
+    includeAudio: true,
+    fps: 24,
+    defaultWidth: 1344,
+    defaultHeight: 768,
+    defaultLength: 124, // 17k+5 grid, ~5.2s @ 24fps
+    requiresImage: false,
+    supportsEndImage: true,
+  },
+  {
     // LTX 2.3 Flash AV — single-stage distilled TEMPLATE lane. The recipe is
     // template-locked in src/workflows/ltx23_flash.json (ManualSigmas 8-step
     // schedule, cfg 1, euler_ancestral_cfg_pp, AV concat latent path, tiled
@@ -715,7 +754,7 @@ export const VIDEO_MODEL_PROFILES: VideoModelProfile[] = [
     name: "LTX 2.3 Flash AV",
     shortName: "LTX Flash",
     description:
-      "Default text-to-video: single-stage LTX 2.3 distilled template with native audio, 960x544 @ 24fps. Optional start image (i2v condition).",
+      "Default text-to-video: single-stage LTX 2.3 distilled template with native audio, 960x544 default @ 24fps (width/height overridable, snapped to the 32px grid — so 1080x1920 → 1088x1920). Optional start image (i2v condition).",
     kind: "ltx-template",
     backend: "comfyui",
     templateFile: "ltx23_flash.json",
@@ -791,7 +830,7 @@ export const VIDEO_MODEL_PROFILES: VideoModelProfile[] = [
     name: "LTX 2.3 Lip-Sync AV",
     shortName: "LTX Lip-Sync",
     description:
-      "Talking-head lip-sync: presenter still + voiceover (wav/mp3, max 5.0s) → LTX 2.3 audio-conditioned i2v, 960x544 @ 24fps, original VO muxed into the mp4. Requires BOTH imageUrl and audioUrl.",
+      "Talking-head lip-sync: presenter still + voiceover (wav/mp3, max 5.0s) → LTX 2.3 audio-conditioned i2v, 960x544 default @ 24fps (width/height overridable, 32px grid), original VO muxed into the mp4. Requires BOTH imageUrl and audioUrl.",
     kind: "ltx-template",
     backend: "comfyui",
     templateFile: "ltx23_lipsync.json",
