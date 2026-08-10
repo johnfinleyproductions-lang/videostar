@@ -74,7 +74,12 @@ import {
   type VideoModelProfile,
 } from "@/lib/models";
 import { getLane, resolveLaneModelId } from "@/lib/lanes";
-import { pickWorker, resolveWorkerForLane, type FleetWorker } from "@/lib/fleet";
+import {
+  FleetWorkerUnavailableError,
+  pickWorker,
+  resolveWorkerForLane,
+  type FleetWorker,
+} from "@/lib/fleet";
 import {
   buildRemotionProps,
   createRemotionRender,
@@ -557,9 +562,22 @@ export async function POST(request: NextRequest) {
     // single-base build. Every upload, probe, VRAM sweep, and queue below
     // targets THIS worker's base, and the history item records the worker's
     // NAME so the status/output routes follow the job to the same box.
-    const worker: FleetWorker = await pickWorker(
-      resolveWorkerForLane(modelProfile.kind ?? "ltx"),
-    );
+    // EXCLUSIVE lanes (vidbox-sidecar kinds): a down worker throws
+    // FleetWorkerUnavailableError → honest 503 with the restart runbook,
+    // never a silent fallback to a box that only works by node-overlap luck
+    // (the RemotionServiceUnreachableError precedent above).
+    let worker: FleetWorker;
+    try {
+      worker = await pickWorker(
+        resolveWorkerForLane(modelProfile.kind ?? "ltx"),
+        modelProfile.kind ?? "ltx",
+      );
+    } catch (error) {
+      if (error instanceof FleetWorkerUnavailableError) {
+        return NextResponse.json({ error: error.message }, { status: 503 });
+      }
+      throw error;
+    }
     const comfyBase = worker.comfyBase as string;
     console.log(
       `[FrameForge] Dispatch worker: ${worker.name} (${comfyBase}) for kind=${modelProfile.kind ?? "ltx"}, model=${modelProfile.id}`,

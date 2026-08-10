@@ -46,6 +46,37 @@ export interface FleetWorker {
   lanes: "*" | readonly string[];
   /** The legacy/default worker — the fallback for every lane and all old history. */
   isDefault?: boolean;
+  /**
+   * This worker is the ONLY box that can run its lanes — when it is down,
+   * dispatch must FAIL LOUDLY (FleetWorkerUnavailableError → 503) instead of
+   * falling back to another worker. Born 2026-08-09: the sidecar died and an
+   * svi-chain draft silently dispatched to the live 8188 box, which happened
+   * to work only because live KJNodes also had the node.
+   */
+  exclusive?: boolean;
+  /** Operator runbook line appended to the unavailable error (how to restart). */
+  restartHint?: string;
+}
+
+/**
+ * Thrown by pickWorker when an `exclusive` worker's lane is dispatched while
+ * that worker is down. The generate route answers it with an honest 503 (the
+ * RemotionServiceUnreachableError precedent) — never a silent fallback.
+ */
+export class FleetWorkerUnavailableError extends Error {
+  readonly workerName: string;
+
+  constructor(worker: FleetWorker, lane?: string) {
+    const laneNote = lane ? ` for lane "${lane}"` : "";
+    super(
+      `Fleet worker "${worker.name}" (${worker.comfyBase}) is required${laneNote} ` +
+        `but did not answer /system_stats — job NOT dispatched (no fallback: ` +
+        `only this worker can run the lane).` +
+        (worker.restartHint ? ` ${worker.restartHint}` : ""),
+    );
+    this.name = "FleetWorkerUnavailableError";
+    this.workerName = worker.name;
+  }
 }
 
 const FLEET_ENV_OVERRIDE = "FRAMEFORGE_FLEET";
@@ -78,10 +109,10 @@ function embeddedFleet(): FleetWorker[] {
       // The ComfyUI v0.30 SIDECAR on this same box (~/ComfyUI-v30, port 8190,
       // loopback-only — FrameForge runs on the box, so 127.0.0.1 reaches it).
       // The ONLY worker with MiniMax-H3 nodes/weights; the live 0.18.1 box
-      // cannot run that lane. resolveWorkerForLane lists lane-specific
-      // workers first, so "minimax-h3" dispatches here with the default box
-      // as the (non-functional, clear-error) fallback when the sidecar is
-      // down — start it with:
+      // cannot run that lane. EXCLUSIVE: its lanes never fall back to the
+      // default box — a down sidecar means a 503 with the restart runbook,
+      // not a dispatch to 8188 that only works by node-overlap luck.
+      // Start it with:
       //   cd ~/ComfyUI-v30 && setsid ~/venvs/comfyui-v30/bin/python \
       //     main.py --listen 127.0.0.1 --port 8190
       // Other lanes are unaffected: this worker never matches them and is
@@ -90,6 +121,10 @@ function embeddedFleet(): FleetWorker[] {
       comfyBase:
         cleanBase(process.env.SIDECAR_COMFYUI_URL) ?? "http://127.0.0.1:8190",
       lanes: ["minimax-h3"],
+      exclusive: true,
+      restartHint:
+        'Restart it on vidbox: schtasks /Run /TN "Evergreen ComfyUI Sidecar" ' +
+        "(then retry once http://127.0.0.1:8190/system_stats answers).",
     },
     {
       // FLUX stills + HV-HUMANS + MUSIC offload box (not active yet —
@@ -207,6 +242,15 @@ export function getFleet(): FleetWorker[] {
       if (override.isDefault !== undefined) {
         existing.isDefault = Boolean(override.isDefault);
       }
+      if (override.exclusive !== undefined) {
+        existing.exclusive = Boolean(override.exclusive);
+      }
+      if (override.restartHint !== undefined) {
+        existing.restartHint =
+          typeof override.restartHint === "string"
+            ? override.restartHint
+            : undefined;
+      }
     } else {
       fleet.push({
         name,
@@ -223,6 +267,11 @@ export function getFleet(): FleetWorker[] {
             ? []
             : (normalizeLanes(override.lanes, name) ?? []),
         isDefault: Boolean(override.isDefault),
+        exclusive: Boolean(override.exclusive),
+        restartHint:
+          typeof override.restartHint === "string"
+            ? override.restartHint
+            : undefined,
       });
     }
   }
@@ -288,6 +337,11 @@ export function getWorkerWsBase(worker: FleetWorker): string {
  * pseudo-lane like "flux-image"/"finish"): lane-specific enabled workers
  * first (fleet order), then the default worker, then any other enabled
  * catch-all ("*") workers. With only vidbox enabled this is always [vidbox].
+ *
+ * EXCLUSIVE lanes: when any lane-specific match is `exclusive`, the list is
+ * ONLY the lane-specific matches — no default, no catch-alls. pickWorker
+ * then health-gates the pick and throws FleetWorkerUnavailableError rather
+ * than dispatching the lane to a box that can't (reliably) run it.
  */
 export function resolveWorkerForLane(laneOrKind: string): FleetWorker[] {
   const lane = laneOrKind.trim().toLowerCase();
@@ -311,6 +365,9 @@ export function resolveWorkerForLane(laneOrKind: string): FleetWorker[] {
       push(worker);
     }
   }
+  if (candidates.some((c) => c.exclusive)) {
+    return candidates;
+  }
   push(getDefaultWorker());
   for (const worker of enabled) {
     if (worker.lanes === "*") push(worker);
@@ -318,45 +375,67 @@ export function resolveWorkerForLane(laneOrKind: string): FleetWorker[] {
   return candidates;
 }
 
+/** One /system_stats availability ping (2s timeout). */
+async function workerAnswers(worker: FleetWorker): Promise<boolean> {
+  try {
+    const res = await fetch(`${worker.comfyBase}/system_stats`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    // Drain/cancel so undici doesn't hold the connection open.
+    await res.body?.cancel().catch(() => {});
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Pick the dispatch worker from an ordered candidate list.
  *
- * Single candidate (today's vidbox-only fleet): returned immediately, NO
- * availability ping — the request pattern stays byte-identical to the
- * pre-fleet build, and a down box surfaces exactly today's queue error.
+ * Single NON-exclusive candidate (today's vidbox-only fleet): returned
+ * immediately, NO availability ping — the request pattern stays
+ * byte-identical to the pre-fleet build, and a down box surfaces exactly
+ * today's queue error.
+ *
+ * Single EXCLUSIVE candidate (a lane only one box can run): health-gated —
+ * ping /system_stats; a dead worker THROWS FleetWorkerUnavailableError
+ * (route → 503 with the restart hint) instead of dispatching anywhere.
  *
  * Multiple candidates: ping GET /system_stats down the list (2s timeout
- * each); the first responder wins. If NONE respond, return the first
- * candidate anyway and let the dispatch fail with today's error — an honest
- * queue failure beats inventing a new error contract.
+ * each); the first responder wins. If NONE respond: exclusive head throws
+ * (its lane has no legal fallback); otherwise return the first candidate
+ * anyway and let the dispatch fail with today's error — an honest queue
+ * failure beats inventing a new error contract.
  */
-export async function pickWorker(candidates: FleetWorker[]): Promise<FleetWorker> {
+export async function pickWorker(
+  candidates: FleetWorker[],
+  lane?: string,
+): Promise<FleetWorker> {
   if (candidates.length === 0) {
-    // resolveWorkerForLane always appends the default; reaching this means
-    // the fleet itself is broken — same failure getDefaultWorker reports.
+    // resolveWorkerForLane always appends the default for non-exclusive
+    // lanes; reaching this means the fleet itself is broken — same failure
+    // getDefaultWorker reports.
     return getDefaultWorker();
   }
-  if (candidates.length === 1) return candidates[0];
+  if (candidates.length === 1) {
+    const only = candidates[0];
+    if (!only.exclusive) return only;
+    if (await workerAnswers(only)) return only;
+    throw new FleetWorkerUnavailableError(only, lane);
+  }
 
   for (const worker of candidates) {
-    try {
-      const res = await fetch(`${worker.comfyBase}/system_stats`, {
-        signal: AbortSignal.timeout(2_000),
-      });
-      if (res.ok) {
-        // Drain/cancel so undici doesn't hold the connection open.
-        await res.body?.cancel().catch(() => {});
-        return worker;
-      }
-      await res.body?.cancel().catch(() => {});
-    } catch {
-      // Unreachable within 2s — try the next candidate.
-    }
+    if (await workerAnswers(worker)) return worker;
     console.warn(
       `[FrameForge] worker "${worker.name}" (${worker.comfyBase}) did not answer /system_stats — trying next candidate`,
     );
   }
 
+  if (candidates[0].exclusive) {
+    // An all-exclusive candidate list (resolveWorkerForLane never mixes
+    // exclusive and fallback workers): nothing here may take the lane's job.
+    throw new FleetWorkerUnavailableError(candidates[0], lane);
+  }
   console.warn(
     `[FrameForge] no fleet worker answered /system_stats — dispatching to "${candidates[0].name}" anyway (legacy error surface)`,
   );
