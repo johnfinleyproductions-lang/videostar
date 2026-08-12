@@ -1433,11 +1433,14 @@ export function buildLtxTemplate(params: LtxTemplateBuildParams): {
 
   // i2v ⇄ t2v switch via the inline bypass flag.
   const i2vNodes = Object.values(workflow).filter(
-    (node) => node.class_type === "LTXVImgToVideoConditionOnly",
+    (node) =>
+      node.class_type === "LTXVImgToVideoConditionOnly" ||
+      // LTX 2.5 uses LTXVImgToVideoInplace; same bypass/image/strength inputs.
+      node.class_type === "LTXVImgToVideoInplace",
   );
   if (i2vNodes.length === 0) {
     throw new Error(
-      "LTX template has no LTXVImgToVideoConditionOnly node (i2v/t2v switch)",
+      "LTX template has no LTXVImgToVideoConditionOnly/LTXVImgToVideoInplace node (i2v/t2v switch)",
     );
   }
   for (const node of i2vNodes) {

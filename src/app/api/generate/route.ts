@@ -1849,7 +1849,10 @@ export async function POST(request: NextRequest) {
     // frame. 24fps native WITH audio → the RIFE post job is never submitted
     // for this lane (the status route gates it on kind === "wan-i2v"; RIFE's
     // VHS re-encode would strip the audio track).
-    if (modelProfile.kind === "ltx-template") {
+    if (
+      modelProfile.kind === "ltx-template" ||
+      modelProfile.kind === "ltx25-template"
+    ) {
       const ltxFps = modelProfile.fps ?? 24;
       const ltxWidth =
         body.width || modelProfile.defaultWidth || LTX_VIDEO_MODEL.defaultParams.width;

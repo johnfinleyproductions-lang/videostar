@@ -54,6 +54,7 @@ export type LaneKey =
   | "LTX-FLASH"
   | "LTX-MASTER"
   | "LIP-SYNC"
+  | "LTX25-I2V"
   | "MG-TYPE"
   | "MG-ALPHA"
   | "MATTE"
@@ -295,6 +296,22 @@ export const LANES: readonly LaneDescriptor[] = [
           "REQUIRED http-fetchable voiceover, WAV or MP3, max 5.0s (121 frames @ 24fps) — the clip length derives from it and the original audio is muxed into the output. audioBase64 / audioPath are accepted alternatives. Longer VO → 400: split into lines and stitch.",
       },
     ],
+  },
+  {
+    laneKey: "LTX25-I2V",
+    title: "LTX 2.5 I2V (int8)",
+    description:
+      "LTX 2.5 image-to-video on ComfyUI-v32: single-stage distilled int8 pass at 960x544 @ 24fps (optional start image, no native audio) — explicit selection only, routes to the separate :8192 instance.",
+    kind: "ltx25-template",
+    executor: "generate",
+    endpoint: "/api/generate",
+    modelId: "ltx25-i2v",
+    requiresImage: false,
+    acceptsImage: true,
+    textOnly: false,
+    supportsAudio: profile("ltx25-i2v").includeAudio === true,
+    outputFormat: "mp4",
+    typicalRenderMinutes: 7,
   },
   {
     // MG-TYPE is a PROXY lane: /api/generate validates composition + props

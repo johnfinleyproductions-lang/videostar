@@ -258,6 +258,17 @@ const TEMPLATES = {
     ],
     forbidden: ["FF End Image", "FF Sampler S2"],
   },
+  // LTX 2.5 int8 i2v lane (ComfyUI-v32 :8192) — same single-stage title set as
+  // flash (no audio, no stage-2, no end image). Node chain verified live on v32
+  // 2026-08-12 (UNETLoader int8 / CLIPLoader "ltxv" Gemma-4 / VAELoader /
+  // LTXVImgToVideoInplace), and rendered a 960x544x121 5.04s mp4 end-to-end.
+  "ltx25_i2v.json": {
+    required: [
+      "FF Positive", "FF Negative", "FF Start Image", "FF Seed",
+      "FF Sampler S1", "FF Output",
+    ],
+    forbidden: ["FF End Image", "FF Sampler S2"],
+  },
   // LIP-SYNC lane (audio-conditioned i2v talking head) — patched by
   // buildLtxLipsync() (see LTX_LIPSYNC_TEMPLATE_TITLES). Same single-stage
   // distilled recipe as flash, plus: "FF Audio" (LoadAudio, the input VO) →

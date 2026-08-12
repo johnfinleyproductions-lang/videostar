@@ -91,6 +91,16 @@ function embeddedFleet(): FleetWorker[] {
       wsBase: cleanBase(process.env.THINK_COMFYUI_WS_URL),
       lanes: ["matte"],
     },
+    {
+      // LTX 2.5 int8 box — ComfyUI-v32 on this same host (:8192), a SEPARATE
+      // instance from the :8188 production ComfyUI. Enabled the moment
+      // COMFYUI_V32_URL is set. Serves only the ltx25-template lane so ltx25
+      // jobs land on :8192 and never collide with the :8188 default worker.
+      name: "vidbox-v32",
+      comfyBase: cleanBase(process.env.COMFYUI_V32_URL),
+      wsBase: cleanBase(process.env.COMFYUI_V32_WS_URL),
+      lanes: ["ltx25-template"],
+    },
   ];
 }
 

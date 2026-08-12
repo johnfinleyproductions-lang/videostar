@@ -61,6 +61,9 @@ export type VideoModelId =
   // LTX template lane (audio-conditioned i2v lip-sync: presenter still +
   // voiceover in, talking-head clip out; explicit selection only)
   | "ltx23-lipsync"
+  // LTX 2.5 int8 i2v template lane (distilled single-stage; routes to the
+  // separate ComfyUI-v32 instance at :8192, not the :8188 production box)
+  | "ltx25-i2v"
   // Remotion MG-TYPE lane (typography/motion-graphics; renders on the think
   // render service, NOT ComfyUI — explicit selection only, never a default)
   | "mg-type"
@@ -150,6 +153,13 @@ const FRAMESTATION_GEMMA_ENCODER = "comfy_gemma_3_12B_it.safetensors";
 // causes stiff motion + color drift; verified by sha256 2026-07-14.
 const DISTILLED_LORA =
   "ltxv/ltx2/ltx-2.3-22b-distilled-lora-384-1.1.safetensors";
+// LTX 2.5 int8 model files on ComfyUI-v32 (:8192). Display-only mirrors of the
+// values hard-coded in src/workflows/ltx25_i2v.json (the video VAE is a
+// standalone VAELoader in that template, not carried on the profile).
+const LTX25_TRANSFORMER =
+  "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors";
+const LTX25_GEMMA_ENCODER =
+  "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors";
 
 /**
  * Wan 2.2 14B model files (paths relative to the ComfyUI models folders).
@@ -815,6 +825,41 @@ export const VIDEO_MODEL_PROFILES: VideoModelProfile[] = [
     supportsEndImage: false,
   },
   {
+    // LTX 2.5 int8 i2v — single-stage distilled TEMPLATE lane on the SEPARATE
+    // ComfyUI-v32 instance (127.0.0.1:8192, NOT the :8188 production box). The
+    // recipe is template-locked in src/workflows/ltx25_i2v.json (UNETLoader
+    // int8 transformer + CLIPLoader type "ltxv" Gemma-4 int8 + standalone
+    // VAELoader bf16; ManualSigmas 8-step, cfg 1, euler_ancestral;
+    // LTXVImgToVideoInplace first-frame inject; tiled VAE decode; SaveVideo
+    // mp4/h264). Distillation is baked into the transformer file — no distill
+    // LoRA node. kind "ltx25-template" routes this lane to the vidbox-v32 fleet
+    // worker (fleet.ts) and through the ltx-template builder branch
+    // (generate/route.ts). Only prompt/negative/seed/size/length and the i2v
+    // bypass are patched at dispatch. Explicit selection only, never a default.
+    // Proven end-to-end 2026-08-12 (960x544x121 -> 5.04s mp4 on ComfyUI-v32).
+    id: "ltx25-i2v",
+    name: "LTX 2.5 I2V (int8)",
+    shortName: "LTX 2.5",
+    description:
+      "LTX 2.5 image-to-video: single-stage distilled int8 template, 960x544 @ 24fps, on ComfyUI-v32. Optional start image (i2v condition); no native audio.",
+    kind: "ltx25-template",
+    backend: "comfyui",
+    templateFile: "ltx25_i2v.json",
+    // Display-only mirrors of the template-locked recipe values.
+    checkpoint: LTX25_TRANSFORMER,
+    textEncoder: LTX25_GEMMA_ENCODER,
+    steps: 8,
+    videoCfg: 1,
+    audioCfg: 0,
+    includeAudio: false,
+    fps: 24,
+    defaultWidth: 960,
+    defaultHeight: 544,
+    defaultLength: 121, // 8n+1 grid, ~5s @ 24fps
+    requiresImage: false,
+    supportsEndImage: false,
+  },
+  {
     // Remotion MG-TYPE — the EXTERNAL motion-graphics executor (kind
     // "remotion"): deterministic React/Remotion CPU renders on the think
     // render service (192.168.4.200:3070, ~/evergreen-remotion — see
@@ -993,6 +1038,7 @@ export function resolveVideoModelId(
     known.kind !== "audio" &&
     known.kind !== "remotion" &&
     known.kind !== "ltx-template" &&
+    known.kind !== "ltx25-template" &&
     known.kind !== "hv-template" &&
     known.kind !== "ltx-desktop"
   ) {
