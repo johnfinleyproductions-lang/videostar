@@ -40,6 +40,7 @@ import {
 import type { VideoProfileKind } from "./types";
 import { REMOTION_COMPOSITION_IDS } from "./remotion-client";
 import {
+  CAMERA_LIB_MOVES,
   DEFAULT_CAMERA_POSE,
   FOLEY_MAX_SECONDS,
   MUSIC_DEFAULT_SECONDS,
@@ -54,6 +55,7 @@ export type LaneKey =
   | "LTX-FLASH"
   | "LTX-MASTER"
   | "LIP-SYNC"
+  | "LTX25-I2V"
   | "MG-TYPE"
   | "MG-ALPHA"
   | "MATTE"
@@ -61,6 +63,10 @@ export type LaneKey =
   | "MUSIC"
   | "HV-HUMANS"
   | "MINIMAX-H3"
+  | "SVI-CHAIN"
+  | "LTX-I2V"
+  | "LTX-BEATS"
+  | "LTX-CAMERA"
   | "FINISH-STACK";
 
 /** How a lane is executed. */
@@ -296,6 +302,22 @@ export const LANES: readonly LaneDescriptor[] = [
           "REQUIRED http-fetchable voiceover, WAV or MP3, max 5.0s (121 frames @ 24fps) — the clip length derives from it and the original audio is muxed into the output. audioBase64 / audioPath are accepted alternatives. Longer VO → 400: split into lines and stitch.",
       },
     ],
+  },
+  {
+    laneKey: "LTX25-I2V",
+    title: "LTX 2.5 I2V (int8)",
+    description:
+      "LTX 2.5 image-to-video on ComfyUI-v32: single-stage distilled int8 pass at 960x544 @ 24fps (optional start image, no native audio) — explicit selection only, routes to the separate :8192 instance.",
+    kind: "ltx25-template",
+    executor: "generate",
+    endpoint: "/api/generate",
+    modelId: "ltx25-i2v",
+    requiresImage: false,
+    acceptsImage: true,
+    textOnly: false,
+    supportsAudio: profile("ltx25-i2v").includeAudio === true,
+    outputFormat: "mp4",
+    typicalRenderMinutes: 7,
   },
   {
     // MG-TYPE is a PROXY lane: /api/generate validates composition + props
@@ -551,6 +573,138 @@ export const LANES: readonly LaneDescriptor[] = [
     supportsAudio: profile("minimax-h3").includeAudio === true,
     outputFormat: "mp4",
     typicalRenderMinutes: 8,
+  },
+  {
+    // SVI 2.0 Pro long-form chain (pilot-proven 2026-08-09): drift-free
+    // multi-beat sequences — the scene NEVER melts across clips. One prompt
+    // per story beat (newline-separated in `beats`, or the prompt field split
+    // by lines). Anchor image required — it pins identity for every clip.
+    // Runs on the "vidbox-sidecar" fleet worker (ComfyUI v0.30, port 8190).
+    // Known bias: SVI trades motion energy for stability; hero preset
+    // (no distill) recovers most of it. Overnight-shift material: budget
+    // ~25-30 min per beat hero, ~16 draft.
+    laneKey: "SVI-CHAIN",
+    title: "SVI Long-Form Chain",
+    description:
+      "Drift-free long form: chain 81-frame beats (one prompt per line) from a single anchor image — scene and identity hold indefinitely (SVI 2.0 Pro on Wan 2.2). Hero = full motion, ~25-30 min/beat; draft variant ~16 min/beat with tamer motion. 1280x720 @ 16fps, max 6 beats per job. Needs the v0.30 sidecar running.",
+    kind: "svi-chain",
+    executor: "generate",
+    endpoint: "/api/generate",
+    modelId: "svi-chain",
+    variants: [
+      {
+        modelId: "svi-chain-draft",
+        when: "Iterating the beat list or anchor cheaply (6-step distill, ~16 min/beat, reduced motion) — promote the final beat list to svi-chain for the hero render.",
+      },
+    ],
+    requiresImage: true,
+    acceptsImage: true,
+    textOnly: false,
+    supportsAudio: false,
+    outputFormat: "mp4",
+    typicalRenderMinutes: 80,
+    extraParams: [
+      {
+        name: "beats",
+        type: "string",
+        description:
+          "The story beats, ONE PER LINE (newline-separated), each a full motion prompt for one 81-frame clip. Omit to split the main prompt field by lines instead. 1-6 beats.",
+      },
+    ],
+  },
+  {
+    // The fast cinematic motion lane (sidecar): Krea/Flux still → LTX 2.3
+    // I2V, ~4x faster than Wan with identity preserved. Motion-only prompts
+    // (describe what changes after frame 1 — never re-describe the still).
+    // An end image auto-upgrades the render to FLF2V keyframing.
+    laneKey: "LTX-I2V",
+    title: "LTX 2.3 Fast I2V",
+    description:
+      "Animate a strong still FAST — LTX 2.3 distilled on the sidecar, ~1.5 min/clip at 1216x512 @ 24fps, identity preserved. Prompt = motion only (what changes after frame 1). Add endImageUrl for first+last keyframe travel. Needs the v0.30 sidecar running.",
+    kind: "ltx-sidecar",
+    executor: "generate",
+    endpoint: "/api/generate",
+    modelId: "ltx23-i2v-fast",
+    variants: [
+      {
+        modelId: "ltx23-flf2v",
+        when: "Explicit keyframe work — pass model \"ltx23-flf2v\" with BOTH imageUrl and endImageUrl (the i2v lane also auto-upgrades when an end image arrives).",
+      },
+    ],
+    requiresImage: true,
+    acceptsImage: true,
+    textOnly: false,
+    supportsAudio: false,
+    outputFormat: "mp4",
+    typicalRenderMinutes: 2,
+    extraParams: [
+      {
+        name: "endImageUrl",
+        type: "string",
+        default: undefined,
+        required: false,
+        description:
+          "Optional last-frame keyframe image URL — providing it upgrades the render to FLF2V first+last keyframe travel.",
+      },
+    ],
+  },
+  {
+    // Cameraman IC-LoRA v2 motion transfer (sidecar): a library reference
+    // clip drives the camera; the prompt drives the scene. Keep camera verbs
+    // OUT of the prompt (the LoRA author's rule — the reference IS the move).
+    laneKey: "LTX-CAMERA",
+    title: "LTX 2.3 Camera Transfer",
+    description:
+      "Real, repeatable camera moves: pick cameraMove (push_in, pull_back, pan_left/right, tilt_up/down) and the Cameraman IC-LoRA transfers that exact motion onto your still + scene prompt. Dev-model quality with audio, 960x544 @ 24fps. Keep camera verbs out of the prompt. Needs the v0.30 sidecar.",
+    kind: "ltx-sidecar",
+    executor: "generate",
+    endpoint: "/api/generate",
+    modelId: "ltx23-camera",
+    requiresImage: true,
+    acceptsImage: true,
+    textOnly: false,
+    supportsAudio: true,
+    outputFormat: "mp4",
+    typicalRenderMinutes: 8,
+    extraParams: [
+      {
+        name: "cameraMove",
+        type: "enum",
+        values: CAMERA_LIB_MOVES,
+        default: "push_in",
+        description:
+          "Camera-move reference from the on-box library; synonyms accepted (dolly_in, zoom_out, jib_up, ...).",
+      },
+    ],
+  },
+  {
+    // PromptRelay in-generation beat scheduling (sidecar): one generation,
+    // several story beats, switching on schedule (gated test PASSED
+    // 2026-08-04 on the distilled 8-step recipe).
+    laneKey: "LTX-BEATS",
+    title: "LTX 2.3 Multi-Beat",
+    description:
+      "Several story beats in ONE generation: prompt = pipe-separated beats (\"he reads | he stands | he walks to the window\", optional [0-50] weights); optional globalPrompt anchors style/character. Text-only, 1216x512 @ 24fps, ~2 min for 4s. Needs the v0.30 sidecar running.",
+    kind: "ltx-sidecar",
+    executor: "generate",
+    endpoint: "/api/generate",
+    modelId: "ltx23-beats",
+    requiresImage: false,
+    acceptsImage: false,
+    textOnly: true,
+    supportsAudio: false,
+    outputFormat: "mp4",
+    typicalRenderMinutes: 2,
+    extraParams: [
+      {
+        name: "globalPrompt",
+        type: "string",
+        default: undefined,
+        description:
+          "Persistent style/character anchor prepended to every beat (PromptRelay); empty = auto-derived from the first beat.",
+        required: false,
+      },
+    ],
   },
   {
     laneKey: "FINISH-STACK",

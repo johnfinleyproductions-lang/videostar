@@ -306,6 +306,7 @@ function applyTitlePatches(
  * are patched on "FF Wan Video" exactly as before. Caller width/height are
  * optional (template default when omitted) and are snapped to the 16px
  * latent grid both nodes require (e.g. 1080x1920 → 1088x1920).
+ * are patched on "FF Wan Video" exactly as before.
  *
  * Samplers: S1 is required (it adds the noise). S2/S3 are patched when
  * present — the 3-sampler distill recipe has all three, the fun-camera recipe
@@ -351,6 +352,8 @@ export function buildWanI2V(params: WanI2VBuildParams): {
   if (typeof height === "number" && height > 0) {
     sizePatch.height = snapToLatentGrid(height);
   }
+  if (typeof width === "number" && width > 0) sizePatch.width = width;
+  if (typeof height === "number" && height > 0) sizePatch.height = height;
 
   const seedPatch = { noise_seed: seed };
 
@@ -637,6 +640,7 @@ export const WAN_ALPHA_TEMPLATE_TITLES = {
  * WanVaceToVideo / EmptyHunyuanLatentVideo) require width/height on a 16px
  * grid — nearest multiple, so 1080 → 1088.
  */
+/** EmptyHunyuanLatentVideo requires width/height on a 16px grid. */
 function snapToLatentGrid(value: number): number {
   return Math.max(16, Math.round(value / 16) * 16);
 }
@@ -1469,6 +1473,188 @@ export function buildMiniMaxH3(params: MiniMaxH3BuildParams): {
 }
 
 // ---------------------------------------------------------------------------
+// Sidecar LTX 2.3 lanes (core-node graphs on the v0.30 sidecar worker)
+// ---------------------------------------------------------------------------
+
+/**
+ * Node titles across the three sidecar LTX templates (i2v / flf2v / beats).
+ * Not every template carries every title — buildLtxSidecar patches what it
+ * finds ("patch-if-present"), and validates required inputs per template by
+ * which image titles exist.
+ */
+export const LTX_SIDECAR_TITLES = {
+  positive: "FF Positive",
+  negative: "FF Negative",
+  /** PromptRelaySmartEncode (beats template only) — smart/global prompts. */
+  beats: "FF Beats",
+  /** Size/length carrier: LTXVImgToVideo (i2v) or EmptyLTXVLatentVideo. */
+  latent: "FF LTX Latent",
+  /** LTXVEmptyLatentAudio (AV templates only) — frames_number lockstep. */
+  audioLatent: "FF Audio Latent",
+  /** VHS_LoadVideo camera reference (LTX-CAMERA template only). */
+  refVideo: "FF Ref Video",
+  startImage: "FF Start Image",
+  endImage: "FF End Image",
+  seed: "FF Seed",
+  output: "FF Output",
+} as const;
+
+/**
+ * Camera-move reference library (LTX-CAMERA lane): synthetic crop-motion
+ * clips (97f @ 24fps, 480x272) living in the SIDECAR's input dir under
+ * camlib/. A camera move on a still cannot hallucinate — clean motion
+ * references for the Cameraman IC-LoRA to transfer. Regenerate with the
+ * PyAV crop-pan script if the library is lost (any detail-rich still works).
+ */
+export const CAMERA_LIB_MOVES = [
+  "push_in",
+  "pull_back",
+  "pan_left",
+  "pan_right",
+  "tilt_up",
+  "tilt_down",
+] as const;
+export type CameraLibMove = (typeof CAMERA_LIB_MOVES)[number];
+
+/** Synonym map: normalized caller verb -> library move. */
+const CAMERA_LIB_SYNONYMS: Record<string, CameraLibMove> = {
+  push_in: "push_in",
+  dolly_in: "push_in",
+  zoom_in: "push_in",
+  pull_back: "pull_back",
+  pull_out: "pull_back",
+  dolly_out: "pull_back",
+  zoom_out: "pull_back",
+  pan_left: "pan_left",
+  pan_right: "pan_right",
+  truck_left: "pan_left",
+  truck_right: "pan_right",
+  tilt_up: "tilt_up",
+  tilt_down: "tilt_down",
+  jib_up: "tilt_up",
+  jib_down: "tilt_down",
+};
+
+/** Resolve a caller camera verb to a library move; null when unknown. */
+export function resolveCameraLibMove(verb: string): CameraLibMove | null {
+  const key = verb.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  return CAMERA_LIB_SYNONYMS[key] ?? null;
+}
+
+export interface LtxSidecarBuildParams {
+  template: ComfyWorkflow;
+  prompt: string;
+  negative?: string;
+  /** Persistent style/character anchor for the beats template ("" = auto). */
+  globalPrompt?: string;
+  imageName?: string;
+  endImageName?: string;
+  /** Camera-move reference clip (LTX-CAMERA template only), e.g. "camlib/pan_left.mp4". */
+  refVideoName?: string;
+  length: number;
+  seed: number;
+  width?: number;
+  height?: number;
+}
+
+/**
+ * Build a sidecar LTX 2.3 graph (i2v fast / flf2v keyframes / beats) by
+ * patching a loaded template. Recipes are template-locked (8-step distilled,
+ * cfg 1, 24fps, bf16 Gemma — NEVER the e4m3fn quant, which the 0.30 core
+ * silently strips into unconditioned output); only prompt(s), seed, size,
+ * length, and the keyframe stills are patched here.
+ */
+export function buildLtxSidecar(params: LtxSidecarBuildParams): {
+  prompt: ComfyWorkflow;
+  extra_data: { seed: number; length: number; width?: number; height?: number };
+} {
+  const {
+    template,
+    prompt,
+    negative,
+    globalPrompt,
+    imageName,
+    endImageName,
+    refVideoName,
+    length,
+    seed,
+    width,
+    height,
+  } = params;
+
+  const workflow = JSON.parse(JSON.stringify(template)) as ComfyWorkflow;
+
+  const legalLength = validateFrameGrid(length, "ltx");
+  const sizePatch: Record<string, unknown> = { length: legalLength };
+  if (typeof width === "number" && width > 0) {
+    sizePatch.width = snapToLtxGrid(width);
+  }
+  if (typeof height === "number" && height > 0) {
+    sizePatch.height = snapToLtxGrid(height);
+  }
+
+  const patches: Record<string, Record<string, unknown>> = {
+    [LTX_SIDECAR_TITLES.latent]: sizePatch,
+    [LTX_SIDECAR_TITLES.seed]: { noise_seed: seed },
+  };
+  // AV templates keep the audio latent + reference-video frame cap in
+  // lockstep with the video length (patch-if-present).
+  if (findNodeByTitle(workflow, LTX_SIDECAR_TITLES.audioLatent)) {
+    patches[LTX_SIDECAR_TITLES.audioLatent] = { frames_number: legalLength };
+  }
+  const refVideoNode = findNodeByTitle(workflow, LTX_SIDECAR_TITLES.refVideo);
+  if (refVideoNode) {
+    if (!refVideoName) {
+      throw new Error(
+        "This LTX sidecar template requires a camera reference clip (cameraMove)",
+      );
+    }
+    patches[LTX_SIDECAR_TITLES.refVideo] = {
+      video: refVideoName,
+      frame_load_cap: legalLength,
+    };
+  }
+  // Prompt carrier differs by template: CLIPTextEncode (i2v/flf2v) vs
+  // PromptRelaySmartEncode (beats). Patch whichever title the template has.
+  if (findNodeByTitle(workflow, LTX_SIDECAR_TITLES.beats)) {
+    patches[LTX_SIDECAR_TITLES.beats] = {
+      smart_prompt: prompt,
+      global_prompt: globalPrompt?.trim() ?? "",
+    };
+  } else {
+    patches[LTX_SIDECAR_TITLES.positive] = { text: prompt };
+  }
+  if (negative && negative.trim()) {
+    patches[LTX_SIDECAR_TITLES.negative] = { text: negative };
+  }
+  applyTitlePatches(workflow, patches);
+
+  // Keyframe stills: a template that carries an image title REQUIRES the
+  // matching name (no silent fallback to the placeholder example.png).
+  for (const [title, name, label] of [
+    [LTX_SIDECAR_TITLES.startImage, imageName, "start image (imageUrl)"],
+    [LTX_SIDECAR_TITLES.endImage, endImageName, "end image (endImageUrl)"],
+  ] as const) {
+    const found = findNodeByTitle(workflow, title);
+    if (!found) continue;
+    if (!name) {
+      throw new Error(`This LTX sidecar template requires a ${label}`);
+    }
+    found.node.inputs.image = name;
+  }
+
+  return {
+    prompt: workflow,
+    extra_data: {
+      seed,
+      length: legalLength,
+      width: sizePatch.width as number | undefined,
+      height: sizePatch.height as number | undefined,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // LTX template lane (Flash AV — single-stage distilled, AV latent path)
 // ---------------------------------------------------------------------------
 
@@ -1551,13 +1737,20 @@ export function buildLtxTemplate(params: LtxTemplateBuildParams): {
   // EmptyLTXVLatentVideo requires. Single-stage templates (Flash) have
   // factor 1 and get the same snap (e.g. 1080x1920 → 1088x1920), so
   // off-grid sizes no longer reach the latent node raw.
+  // Requested width/height always mean the FINAL output size: with an
+  // upsampler present the stage-1 latent is patched at size/factor (snapped
+  // to the 32px grid EmptyLTXVLatentVideo requires). Single-stage templates
+  // (Flash) have factor 1 and are patched exactly as before.
   const upscaleFactor = Object.values(workflow)
     .filter((node) => node.class_type === "LatentUpscaleModelLoader")
     .reduce((factor, node) => {
       const match = /-x(\d+)-/.exec(String(node.inputs.model_name ?? ""));
       return factor * (match ? Number(match[1]) : 2);
     }, 1);
-  const snapStage1 = (value: number) => snapToLtxGrid(value / upscaleFactor);
+  const snapStage1 = (value: number) =>
+    upscaleFactor === 1
+      ? value // Flash path: byte-identical to the proven lane-2 behavior.
+      : Math.max(64, Math.round(value / upscaleFactor / 32) * 32);
 
   // Latent sizing is patched by CLASS, not title, so recipe variants with
   // differently-titled latent nodes keep working:
@@ -1588,11 +1781,14 @@ export function buildLtxTemplate(params: LtxTemplateBuildParams): {
 
   // i2v ⇄ t2v switch via the inline bypass flag.
   const i2vNodes = Object.values(workflow).filter(
-    (node) => node.class_type === "LTXVImgToVideoConditionOnly",
+    (node) =>
+      node.class_type === "LTXVImgToVideoConditionOnly" ||
+      // LTX 2.5 uses LTXVImgToVideoInplace; same bypass/image/strength inputs.
+      node.class_type === "LTXVImgToVideoInplace",
   );
   if (i2vNodes.length === 0) {
     throw new Error(
-      "LTX template has no LTXVImgToVideoConditionOnly node (i2v/t2v switch)",
+      "LTX template has no LTXVImgToVideoConditionOnly/LTXVImgToVideoInplace node (i2v/t2v switch)",
     );
   }
   for (const node of i2vNodes) {
@@ -1747,6 +1943,8 @@ export function buildLtxLipsync(params: LtxLipsyncBuildParams): {
       if (typeof height === "number" && height > 0) {
         node.inputs.height = snapToLtxGrid(height);
       }
+      if (typeof width === "number" && width > 0) node.inputs.width = width;
+      if (typeof height === "number" && height > 0) node.inputs.height = height;
     }
   }
   if (videoLatents === 0) {
@@ -2102,4 +2300,202 @@ export function buildImageToVideoWorkflow(
   }
 
   return base;
+}
+
+// ---------------------------------------------------------------------------
+// SVI 2.0 Pro long-form chain (svi-chain / svi-chain-draft)
+// ---------------------------------------------------------------------------
+
+export interface SviChainBuildParams {
+  /** One motion prompt per 81-frame beat, in story order (1-6 beats). */
+  beats: string[];
+  /** Uploaded ComfyUI input ref for the anchor image (identity + scene pin). */
+  anchorImageName: string;
+  seed: number;
+  /** hero = 10 steps cfg 4.0 no distill; draft = 6-step lightning (pilot recipe). */
+  preset: "hero" | "draft";
+  width?: number;
+  height?: number;
+}
+
+const SVI_NEGATIVE =
+  "static image, no motion, blurry, low quality, distorted face, extra limbs, text, watermark, jpeg artifacts";
+
+/**
+ * Code-generate the Stable-Video-Infinity 2.0 Pro chain graph (no template
+ * file — beat count is variable). Pilot-proven on the v0.30 sidecar
+ * 2026-08-09: KJNodes WanImageToVideoSVIPro chains 81-frame clips from one
+ * VAE-encoded anchor latent (anchor_samples) plus the previous clip's
+ * sampled latent (prev_samples); scene lock holds across every handoff.
+ *
+ * Presets (per the SVI authors + pilot findings):
+ *  - draft: 6 steps split 3/3, cfg 1.5, SVI 1.0 + lightning 0.6 high / 1.0
+ *    low (the documented SVI x LightX2V conflict tames motion — draft only).
+ *  - hero: 10 steps split 5/5, cfg 4.0, SVI 1.0, NO lightning — full motion
+ *    and beat adherence at ~2x the render time.
+ *
+ * All clips decode into one ImageBatch chain and a single VHS_VideoCombine,
+ * so the standard one-output status/finish flow applies. The ~5-frame
+ * overlap between consecutive clips is left in (v1); trim in post if a
+ * seam-beat repeat ever reads on screen.
+ */
+export function buildSviChain(params: SviChainBuildParams): {
+  prompt: ComfyWorkflow;
+  extra_data: { seed: number; length: number; width?: number; height?: number };
+} {
+  const { beats, anchorImageName, seed, preset } = params;
+  const width = params.width ?? 1280;
+  const height = params.height ?? 720;
+
+  if (!anchorImageName) {
+    throw new Error("buildSviChain requires anchorImageName (the anchor still)");
+  }
+  if (beats.length < 1 || beats.length > 6) {
+    throw new Error(
+      `buildSviChain takes 1-6 beats (got ${beats.length}) — longer sequences run as multiple jobs`,
+    );
+  }
+
+  const hero = preset === "hero";
+  const steps = hero ? 10 : 6;
+  const boundary = hero ? 5 : 3; // high-noise expert handles steps 0..boundary
+  const cfg = hero ? 4.0 : 1.5;
+
+  const g: Record<string, unknown> = {};
+  const node = (
+    id: number | string,
+    classType: string,
+    inputs: Record<string, unknown>,
+    title?: string,
+  ): [string, number] => {
+    g[String(id)] = {
+      class_type: classType,
+      inputs,
+      ...(title ? { _meta: { title } } : {}),
+    };
+    return [String(id), 0];
+  };
+
+  let hi = node(1, "UNETLoader", {
+    unet_name: "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+    weight_dtype: "default",
+  });
+  let lo = node(2, "UNETLoader", {
+    unet_name: "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+    weight_dtype: "default",
+  });
+  hi = node(3, "LoraLoaderModelOnly", {
+    model: hi,
+    lora_name:
+      "svi/SVI_v2_PRO_Wan2.2-I2V-A14B_HIGH_lora_rank_128_fp16.safetensors",
+    strength_model: 1.0,
+  });
+  lo = node(5, "LoraLoaderModelOnly", {
+    model: lo,
+    lora_name:
+      "svi/SVI_v2_PRO_Wan2.2-I2V-A14B_LOW_lora_rank_128_fp16.safetensors",
+    strength_model: 1.0,
+  });
+  if (!hero) {
+    hi = node(4, "LoraLoaderModelOnly", {
+      model: hi,
+      lora_name: "wan22-lightning/wan22_lightning_i2v_high.safetensors",
+      strength_model: 0.6,
+    });
+    lo = node(6, "LoraLoaderModelOnly", {
+      model: lo,
+      lora_name: "wan22-lightning/wan22_lightning_i2v_low.safetensors",
+      strength_model: 1.0,
+    });
+  }
+  hi = node(7, "ModelSamplingSD3", { model: hi, shift: 8.0 });
+  lo = node(8, "ModelSamplingSD3", { model: lo, shift: 8.0 });
+
+  const clip = node(9, "CLIPLoader", {
+    clip_name: "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+    type: "wan",
+    device: "default",
+  });
+  const vae = node(10, "VAELoader", { vae_name: "wan_2.1_vae.safetensors" });
+  const img = node(11, "LoadImage", { image: anchorImageName }, "FF Anchor");
+  const scaled = node(12, "ImageScale", {
+    image: img,
+    upscale_method: "lanczos",
+    width,
+    height,
+    crop: "disabled",
+  });
+  const anchor = node(13, "VAEEncode", { pixels: scaled, vae });
+  const neg = node(20, "CLIPTextEncode", { clip, text: SVI_NEGATIVE });
+
+  let prev: [string, number] | null = null;
+  let batch: [string, number] | null = null;
+  let nid = 30;
+  for (let i = 0; i < beats.length; i++) {
+    const pos = node(nid++, "CLIPTextEncode", { clip, text: beats[i] });
+    const sviInputs: Record<string, unknown> = {
+      positive: pos,
+      negative: neg,
+      length: 81,
+      anchor_samples: anchor,
+      motion_latent_count: 1,
+    };
+    if (prev) sviInputs.prev_samples = prev;
+    const sviId = String(nid++);
+    g[sviId] = { class_type: "WanImageToVideoSVIPro", inputs: sviInputs };
+    const ksHi = node(nid++, "KSamplerAdvanced", {
+      model: hi,
+      add_noise: "enable",
+      noise_seed: seed + i,
+      steps,
+      cfg,
+      sampler_name: "dpmpp_sde",
+      scheduler: "simple",
+      positive: [sviId, 0],
+      negative: [sviId, 1],
+      latent_image: [sviId, 2],
+      start_at_step: 0,
+      end_at_step: boundary,
+      return_with_leftover_noise: "enable",
+    });
+    const ksLo = node(nid++, "KSamplerAdvanced", {
+      model: lo,
+      add_noise: "disable",
+      noise_seed: 0,
+      steps,
+      cfg,
+      sampler_name: "dpmpp_sde",
+      scheduler: "simple",
+      positive: [sviId, 0],
+      negative: [sviId, 1],
+      latent_image: ksHi,
+      start_at_step: boundary,
+      end_at_step: 10000,
+      return_with_leftover_noise: "disable",
+    });
+    prev = ksLo;
+    const dec = node(nid++, "VAEDecode", { samples: ksLo, vae });
+    batch = batch
+      ? node(nid++, "ImageBatch", { image1: batch, image2: dec })
+      : dec;
+  }
+
+  node(90, "VHS_VideoCombine", {
+    images: batch as [string, number],
+    frame_rate: 16,
+    loop_count: 0,
+    filename_prefix: "FrameForge-SVI/chain",
+    format: "video/h264-mp4",
+    pix_fmt: "yuv420p",
+    crf: 17,
+    save_metadata: true,
+    trim_to_audio: false,
+    pingpong: false,
+    save_output: true,
+  }, "FF Output");
+
+  return {
+    prompt: g as unknown as ComfyWorkflow,
+    extra_data: { seed, length: 81 * beats.length, width, height },
+  };
 }

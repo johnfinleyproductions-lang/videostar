@@ -31,15 +31,19 @@ import {
   buildFoley,
   buildHv15,
   buildLtxLipsync,
+  buildLtxSidecar,
   buildLtxTemplate,
   buildMatAnyone,
   buildMiniMaxH3,
+  buildSviChain,
   buildVaceInpaint,
   buildVaceRef,
   buildWanAlpha,
   buildWanI2V,
   VACE_IMAGE_MASK_RE,
+  CAMERA_LIB_MOVES,
   durationToLegalFrames,
+  resolveCameraLibMove,
   validateH3FrameGrid,
   FOLEY_FALLBACK_FPS,
   FOLEY_MAX_SECONDS,
@@ -369,6 +373,24 @@ export async function POST(request: NextRequest) {
     if (!startSource && typeof body.sourceImage === "string" && body.sourceImage) {
       imageName = body.sourceImage;
     }
+    // Forgiving alias: `image` / `startImage` / `inputImage` are the intuitive
+    // (and previously silent-failing) ways to name an already-uploaded input
+    // frame. Accept a bare string filename OR the { filename } shape that
+    // /api/upload returns, mapping to sourceImage — an I2V request must never
+    // be quietly rerouted to the no-image LTX lane because the field was named
+    // slightly wrong.
+    if (!startSource && !imageName) {
+      const alias = body.image ?? body.startImage ?? body.inputImage;
+      if (typeof alias === "string" && alias.trim()) {
+        imageName = alias.trim();
+      } else if (
+        alias &&
+        typeof alias === "object" &&
+        typeof (alias as { filename?: unknown }).filename === "string"
+      ) {
+        imageName = (alias as { filename: string }).filename;
+      }
+    }
 
     const endSource = wantsRemotion
       ? null
@@ -390,6 +412,24 @@ export async function POST(request: NextRequest) {
     // Presence-based: a resolved-but-not-yet-uploaded buffer counts exactly
     // like the pre-fleet uploaded ref did.
     const hasImage = Boolean(startSource) || Boolean(imageName);
+    // If the caller clearly meant to send a start image but nothing resolved,
+    // say so loudly instead of silently producing a text-to-video clip.
+    if (!hasImage) {
+      const strayImageKey = [
+        "image",
+        "startImage",
+        "inputImage",
+        "imageUrl",
+        "imageBase64",
+        "imagePath",
+        "sourceImage",
+      ].find((key) => body[key] != null);
+      if (strayImageKey) {
+        console.warn(
+          `[FrameForge] request carried '${strayImageKey}' but no usable input image resolved — routing WITHOUT an image (text-to-video). For I2V pass imageUrl, imageBase64, imagePath, or an uploaded sourceImage/image filename.`,
+        );
+      }
+    }
     let requestedModel: string | undefined = body.model || body.profile;
 
     // Optional laneKey (additive; see GET /api/lanes). An explicit model
@@ -1500,6 +1540,129 @@ export async function POST(request: NextRequest) {
     }
 
     // ------------------------------------------------------------------
+    // Sidecar LTX 2.3 lanes (i2v fast / flf2v keyframes / beats)
+    // ------------------------------------------------------------------
+    // Explicit selection only, all on the "vidbox-sidecar" worker (the bf16
+    // Gemma encoder behaves correctly ONLY on the 0.30 core — see the
+    // 2026-08-04 seed-sweep post-mortem). i2v auto-upgrades to the FLF2V
+    // keyframe template when an end image arrives (the WAN-CINE precedent).
+    // 24fps native — never RIFE'd.
+    if (modelProfile.kind === "ltx-sidecar") {
+      const isBeats = modelProfile.id === "ltx23-beats";
+      if (!isBeats && !imageName) {
+        return NextResponse.json(
+          {
+            error:
+              "The sidecar LTX lanes animate a still — pass imageUrl (or imageBase64 / imagePath / sourceImage)",
+          },
+          { status: 400 },
+        );
+      }
+      // Camera lane: resolve the cameraMove verb to a library reference clip.
+      let refVideoName: string | undefined;
+      if (modelProfile.id === "ltx23-camera") {
+        const rawMove =
+          typeof body.cameraMove === "string" && body.cameraMove.trim()
+            ? body.cameraMove.trim()
+            : "push_in";
+        const move = resolveCameraLibMove(rawMove);
+        if (!move) {
+          return NextResponse.json(
+            {
+              error:
+                `Unknown cameraMove "${rawMove}" — the camera library has: ` +
+                CAMERA_LIB_MOVES.join(", "),
+            },
+            { status: 400 },
+          );
+        }
+        refVideoName = `camlib/${move}.mp4`;
+      }
+      if (modelProfile.id === "ltx23-flf2v" && !endImageName) {
+        return NextResponse.json(
+          {
+            error:
+              "ltx23-flf2v needs BOTH keyframes — pass endImageUrl (or endImageBase64 / endImagePath) alongside the start image",
+          },
+          { status: 400 },
+        );
+      }
+
+      // End image on the fast i2v profile → the FLF2V keyframe template.
+      const templateFile =
+        modelProfile.id === "ltx23-i2v-fast" && endImageName
+          ? "ltx23_flf2v_sidecar.json"
+          : (modelProfile.templateFile ?? "ltx23_i2v_sidecar.json");
+
+      const ltxFps = modelProfile.fps ?? 24;
+      const ltxWidth = body.width || modelProfile.defaultWidth || 1216;
+      const ltxHeight = body.height || modelProfile.defaultHeight || 512;
+      const length = body.duration
+        ? durationToLegalFrames(body.duration, ltxFps, "ltx")
+        : (modelProfile.defaultLength ?? 65);
+      const seed = req.seed ?? Math.floor(Math.random() * 2147483647);
+
+      const template = loadTemplate(templateFile);
+      const workflow = buildLtxSidecar({
+        template,
+        prompt: req.prompt,
+        negative:
+          typeof body.negativePrompt === "string" ? body.negativePrompt : undefined,
+        globalPrompt:
+          typeof body.globalPrompt === "string" ? body.globalPrompt : undefined,
+        imageName: isBeats ? undefined : imageName,
+        endImageName: isBeats ? undefined : endImageName,
+        refVideoName,
+        length,
+        seed,
+        width: ltxWidth,
+        height: ltxHeight,
+      });
+
+      const clientId = uuidv4();
+      const comfyResponse = await queuePrompt(
+        comfyBase,
+        workflow.prompt as unknown as Record<string, unknown>,
+        clientId,
+      );
+
+      const item: VideoGenerationItem = {
+        id,
+        status: "processing",
+        prompt: req.prompt,
+        comfyPromptId: comfyResponse.prompt_id,
+        width: workflow.extra_data.width ?? ltxWidth,
+        height: workflow.extra_data.height ?? ltxHeight,
+        fps: ltxFps,
+        frames: workflow.extra_data.length,
+        duration: framesToDuration(workflow.extra_data.length, ltxFps),
+        resolution: `${workflow.extra_data.width ?? ltxWidth}x${workflow.extra_data.height ?? ltxHeight}`,
+        seed,
+        model: modelProfile.id,
+        modelName: modelProfile.name,
+        worker: worker.name,
+        createdAt: new Date().toISOString(),
+        sourceImageUrl:
+          !isBeats && imageName
+            ? typeof body.imageUrl === "string" && body.imageUrl
+              ? body.imageUrl
+              : imageName
+            : undefined,
+        progress: 0,
+        stage: "main",
+      };
+
+      await addToHistory(item);
+
+      return NextResponse.json({
+        id,
+        comfyPromptId: comfyResponse.prompt_id,
+        clientId,
+        status: "processing",
+      });
+    }
+
+    // ------------------------------------------------------------------
     // MiniMax-H3 omni AV template lane (video + native stereo audio)
     // ------------------------------------------------------------------
     // Explicit selection only. Runs on the "vidbox-sidecar" fleet worker
@@ -1548,6 +1711,92 @@ export async function POST(request: NextRequest) {
         frames: workflow.extra_data.length,
         duration: framesToDuration(workflow.extra_data.length, h3Fps),
         resolution: `${workflow.extra_data.width ?? h3Width}x${workflow.extra_data.height ?? h3Height}`,
+        seed,
+        model: modelProfile.id,
+        modelName: modelProfile.name,
+        worker: worker.name,
+        createdAt: new Date().toISOString(),
+        sourceImageUrl: imageName
+          ? typeof body.imageUrl === "string" && body.imageUrl
+            ? body.imageUrl
+            : imageName
+          : undefined,
+        progress: 0,
+        stage: "main",
+      };
+
+      await addToHistory(item);
+
+      return NextResponse.json({
+        id,
+        comfyPromptId: comfyResponse.prompt_id,
+        clientId,
+        status: "processing",
+      });
+    }
+
+    // ------------------------------------------------------------------
+    // SVI 2.0 Pro long-form chain lane (drift-free multi-beat sequences)
+    // ------------------------------------------------------------------
+    // Explicit selection only. Runs on the "vidbox-sidecar" fleet worker
+    // (ComfyUI v0.30 — the only instance with the Dec-2025+ KJNodes
+    // WanImageToVideoSVIPro node). One prompt per beat: body.beats
+    // (newline-separated) wins; otherwise the prompt field is split by
+    // lines. The anchor image pins identity/scene for EVERY clip. Never
+    // RIFE'd (the /api/status post gate only fires for wan-i2v/wan-vace).
+    if (modelProfile.kind === "svi-chain") {
+      const sviFps = modelProfile.fps ?? 16;
+      if (!imageName) {
+        return NextResponse.json(
+          { error: "svi-chain requires imageUrl (the anchor still that pins identity and scene)" },
+          { status: 400 },
+        );
+      }
+      const beatsSource =
+        typeof body.beats === "string" && body.beats.trim()
+          ? body.beats
+          : req.prompt;
+      const beats = beatsSource
+        .split(/\r?\n+/)
+        .map((b: string) => b.trim())
+        .filter(Boolean);
+      if (beats.length < 1 || beats.length > 6) {
+        return NextResponse.json(
+          { error: `svi-chain takes 1-6 beats, one per line (got ${beats.length})` },
+          { status: 400 },
+        );
+      }
+      const seed = req.seed ?? Math.floor(Math.random() * 2147483647);
+      const preset =
+        modelProfile.id === "svi-chain-draft" ? ("draft" as const) : ("hero" as const);
+
+      const workflow = buildSviChain({
+        beats,
+        anchorImageName: imageName,
+        seed,
+        preset,
+        width: body.width || modelProfile.defaultWidth || 1280,
+        height: body.height || modelProfile.defaultHeight || 720,
+      });
+
+      const clientId = uuidv4();
+      const comfyResponse = await queuePrompt(
+        comfyBase,
+        workflow.prompt as unknown as Record<string, unknown>,
+        clientId,
+      );
+
+      const item: VideoGenerationItem = {
+        id,
+        status: "processing",
+        prompt: beats.join("\n"),
+        comfyPromptId: comfyResponse.prompt_id,
+        width: workflow.extra_data.width ?? 1280,
+        height: workflow.extra_data.height ?? 720,
+        fps: sviFps,
+        frames: workflow.extra_data.length,
+        duration: framesToDuration(workflow.extra_data.length, sviFps),
+        resolution: `${workflow.extra_data.width ?? 1280}x${workflow.extra_data.height ?? 720}`,
         seed,
         model: modelProfile.id,
         modelName: modelProfile.name,
@@ -1888,7 +2137,10 @@ export async function POST(request: NextRequest) {
     // frame. 24fps native WITH audio → the RIFE post job is never submitted
     // for this lane (the status route gates it on kind === "wan-i2v"; RIFE's
     // VHS re-encode would strip the audio track).
-    if (modelProfile.kind === "ltx-template") {
+    if (
+      modelProfile.kind === "ltx-template" ||
+      modelProfile.kind === "ltx25-template"
+    ) {
       const ltxFps = modelProfile.fps ?? 24;
       const ltxWidth =
         body.width || modelProfile.defaultWidth || LTX_VIDEO_MODEL.defaultParams.width;

@@ -93,8 +93,13 @@ export type VideoProfileKind =
   | "audio"
   | "ltx"
   | "ltx-template"
+  // LTX 2.5 int8 template lane — same builder path as "ltx-template" but a
+  // distinct kind so the fleet routes it to the ComfyUI-v32 instance (:8192).
+  | "ltx25-template"
   | "hv-template"
   | "minimax-h3"
+  | "ltx-sidecar"
+  | "svi-chain"
   | "ltx-desktop"
   | "remotion";
 

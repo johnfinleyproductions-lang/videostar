@@ -89,7 +89,7 @@ function embeddedFleet(): FleetWorker[] {
       name: "vidbox-sidecar",
       comfyBase:
         cleanBase(process.env.SIDECAR_COMFYUI_URL) ?? "http://127.0.0.1:8190",
-      lanes: ["minimax-h3"],
+      lanes: ["minimax-h3", "ltx-sidecar", "svi-chain"],
     },
     {
       // FLUX stills + HV-HUMANS + MUSIC offload box (not active yet —
@@ -97,7 +97,7 @@ function embeddedFleet(): FleetWorker[] {
       name: "framerstation",
       comfyBase: cleanBase(process.env.FRAMERSTATION_COMFYUI_URL),
       wsBase: cleanBase(process.env.FRAMERSTATION_COMFYUI_WS_URL),
-      lanes: ["flux-image", "hv-template", "audio"],
+      lanes: ["flux-image", "audio"],
     },
     {
       // Light utility box (not active yet — enabled via THINK_COMFYUI_URL).
@@ -107,6 +107,16 @@ function embeddedFleet(): FleetWorker[] {
       comfyBase: cleanBase(process.env.THINK_COMFYUI_URL),
       wsBase: cleanBase(process.env.THINK_COMFYUI_WS_URL),
       lanes: ["matte"],
+    },
+    {
+      // LTX 2.5 int8 box — ComfyUI-v32 on this same host (:8192), a SEPARATE
+      // instance from the :8188 production ComfyUI. Enabled the moment
+      // COMFYUI_V32_URL is set. Serves only the ltx25-template lane so ltx25
+      // jobs land on :8192 and never collide with the :8188 default worker.
+      name: "vidbox-v32",
+      comfyBase: cleanBase(process.env.COMFYUI_V32_URL),
+      wsBase: cleanBase(process.env.COMFYUI_V32_WS_URL),
+      lanes: ["ltx25-template"],
     },
   ];
 }
