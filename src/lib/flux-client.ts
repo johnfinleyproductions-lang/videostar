@@ -311,6 +311,48 @@ export async function queueFluxPrompt(
   return res.json();
 }
 
+/**
+ * Upload a base64 data-URL reference image into the target worker ComfyUI's
+ * input directory and return the stored filename for LoadImage. The images
+ * API receives references as data URLs (the Image Studio contract), but
+ * ComfyUI's LoadImage only accepts files already in its input folder.
+ */
+export async function uploadFluxInputImage(
+  base: string,
+  dataUrl: string,
+): Promise<string> {
+  const match = /^data:(image\/[a-z0-9+.-]+);base64,(.+)$/i.exec(dataUrl);
+  if (!match) {
+    throw new Error("Reference image must be a base64 image data URL");
+  }
+  const [, mime, encoded] = match;
+  const ext = mime === "image/jpeg" ? "jpg" : mime.slice("image/".length);
+  const filename = `frameforge-ref-${Date.now()}.${ext}`;
+  const form = new FormData();
+  form.append(
+    "image",
+    new Blob([Buffer.from(encoded, "base64")], { type: mime }),
+    filename,
+  );
+  form.append("overwrite", "true");
+
+  const res = await fetch(`${base}/upload/image`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(
+      `Flux ComfyUI reference upload failed (${res.status}): ${text}`,
+    );
+  }
+  const data = (await res.json()) as { name?: string; subfolder?: string };
+  if (!data.name) {
+    throw new Error("Flux ComfyUI reference upload returned no filename");
+  }
+  return data.subfolder ? `${data.subfolder}/${data.name}` : data.name;
+}
+
 export async function getFluxHistory(
   base: string,
   promptId: string,
