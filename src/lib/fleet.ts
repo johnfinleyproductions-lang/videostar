@@ -127,6 +127,22 @@ function embeddedFleet(): FleetWorker[] {
         "(then retry once http://127.0.0.1:8190/system_stats answers).",
     },
     {
+      // H3 Reference-to-Video worker: the comfy-MASTER blue-green instance
+      // (~/ComfyUI-gm, loopback :8193, tmux "comfy-gm", v32 venv) — the only
+      // box with MiniMaxH3ReferenceToVideo + native AddGuide (GuideMaster
+      // pins) + the LBH-123-AI neural latent upscaler. Exclusive like the
+      // sidecar: if it is down the lane answers an honest 503 + runbook.
+      name: "vidbox-gm",
+      comfyBase:
+        cleanBase(process.env.GM_COMFYUI_URL) ?? "http://127.0.0.1:8193",
+      lanes: ["minimax-h3-r2v"],
+      exclusive: true,
+      restartHint:
+        "Restart it on vidbox WSL: tmux new -d -s comfy-gm 'cd /home/evergreen/ComfyUI-gm && " +
+        "CUDA_VISIBLE_DEVICES=0 /home/evergreen/venvs/comfyui-v32/bin/python main.py " +
+        "--listen 127.0.0.1 --port 8193' (then retry once http://127.0.0.1:8193/system_stats answers).",
+    },
+    {
       // FLUX stills + HV-HUMANS + MUSIC offload box (not active yet —
       // enabled the moment FRAMERSTATION_COMFYUI_URL is set).
       name: "framerstation",
