@@ -1,0 +1,34 @@
+lanes on disk: 40
+
+=== A. LIVE worker (real HTTP, real ComfyUI) ===
+  http://192.168.4.196:8188
+  refs=185 present=185 missing_file=0 node_missing=0 undeterminable=0
+
+=== A2. LIVE negative control: inject a model that cannot exist ===
+  lane acestep_music.json, patched UNETLoader.unet_name
+  ok=false missing_file=1
+    -> definitely-not-a-real-model-xyz.safetensors
+
+=== B. REPLAY of captured live :8190 payloads (loopback-only worker) ===
+  captured :8190
+  refs=185 present=176 missing_file=3 node_missing=6 undeterminable=0
+    hunyuan_foley.json: NODE NOT INSTALLED HunyuanModelLoader
+    hunyuan_foley.json: NODE NOT INSTALLED HunyuanDependenciesLoader
+    hv15_hero.json: MISSING FILE hunyuanvideo15_latent_upsampler_1080p.safetensors (LatentUpscaleModelLoader.model_name)
+    hv15_hero_i2v.json: MISSING FILE hunyuanvideo15_latent_upsampler_1080p.safetensors (LatentUpscaleModelLoader.model_name)
+    ltx23_master.json: MISSING FILE ltx-2.3-spatial-upscaler-x2-1.1.safetensors (LatentUpscaleModelLoader.model_name)
+    seedvr2_hero.json: NODE NOT INSTALLED SeedVR2LoadDiTModel
+    seedvr2_hero.json: NODE NOT INSTALLED SeedVR2LoadVAEModel
+    wan22_post_rife.json: NODE NOT INSTALLED RIFE VFI
+
+=== B. REPLAY of captured live :8193 payloads (loopback-only worker) ===
+  captured :8193
+  refs=185 present=178 missing_file=0 node_missing=7 undeterminable=0
+    hunyuan_foley.json: NODE NOT INSTALLED HunyuanModelLoader
+    hunyuan_foley.json: NODE NOT INSTALLED HunyuanDependenciesLoader
+    ltx23_camera_sidecar.json: NODE NOT INSTALLED LTXICLoRALoaderModelOnly
+    seedvr2_hero.json: NODE NOT INSTALLED SeedVR2LoadDiTModel
+    seedvr2_hero.json: NODE NOT INSTALLED SeedVR2LoadVAEModel
+    wan22_post_rife.json: NODE NOT INSTALLED RIFE VFI
+
+SUMMARY: live http://192.168.4.196:8188 → 0 missing file(s), 0 missing node(s), 0 undeterminable.

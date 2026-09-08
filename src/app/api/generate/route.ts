@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readFile } from "fs/promises";
 import path from "path";
 import { v4 as uuidv4 } from "uuid";
+import { isModelPreflightError } from "@/lib/model-preflight";
 import {
   freeComfyMemory,
   getFileHeadBytes,
@@ -2423,6 +2424,14 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error("Generate error:", error);
+    // The resolved worker definitively cannot run this graph (missing model
+    // file, or a class_type it does not have installed). Same honest "this box
+    // cannot take this job" surface as FleetWorkerUnavailableError above — a
+    // 503, never a 500, because nothing is broken: the job went to the wrong
+    // box. Nothing was queued.
+    if (isModelPreflightError(error)) {
+      return NextResponse.json({ error: error.message }, { status: 503 });
+    }
     const message = error instanceof Error ? error.message : "Generation failed";
     // ComfyUI /prompt validation failures (node_errors) come through here
     // with the per-node details already formatted by queuePrompt.
