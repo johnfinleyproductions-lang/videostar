@@ -5,6 +5,7 @@ import {
   queueFluxPrompt,
   getFluxPreflight,
   resolveFluxComfyBase,
+  uploadFluxInputImage,
 } from "@/lib/flux-client";
 import { buildFluxWorkflow } from "@/lib/flux-workflow-builder";
 import {
@@ -125,6 +126,20 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Image Studio sends reference images as base64 data URLs; ComfyUI's
+    // LoadImage only accepts files already in its input directory. Upload
+    // the data URL to the resolved worker and swap in the stored filename.
+    let resolvedReferenceImage = referenceImage;
+    if (
+      typeof referenceImage === "string" &&
+      referenceImage.startsWith("data:")
+    ) {
+      resolvedReferenceImage = await uploadFluxInputImage(
+        fluxBase,
+        referenceImage,
+      );
+    }
+
     const workflow = buildFluxWorkflow({
       prompt,
       negativePrompt,
@@ -133,7 +148,7 @@ export async function POST(request: NextRequest) {
       steps,
       cfg,
       seed,
-      referenceImage,
+      referenceImage: resolvedReferenceImage,
       denoise,
       model,
     });
