@@ -33,6 +33,7 @@ import {
   unloadOllamaModels,
 } from "@/lib/comfyui-client";
 import { addToHistory } from "@/lib/history";
+import { isModelPreflightError } from "@/lib/model-preflight";
 import { getEnabledWorkers, getWorker } from "@/lib/fleet";
 import { loadTemplate, patchByTitle } from "@/lib/workflow-builder";
 import type { ComfyWorkflow, VideoGenerationItem } from "@/lib/types";
@@ -248,6 +249,10 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error("Finish error:", error);
+    // Resolved worker cannot run this graph — 503, not 500. Nothing queued.
+    if (isModelPreflightError(error)) {
+      return NextResponse.json({ error: error.message }, { status: 503 });
+    }
     const message = error instanceof Error ? error.message : "Finish failed";
     // ComfyUI /prompt validation failures (node_errors) come through here
     // with the per-node details already formatted by queuePrompt.

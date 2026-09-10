@@ -1,0 +1,24 @@
+pass extract: finds 2 model refs, ignores non-weight inputs
+pass extract: handles a class_type containing a space
+pass extract: never treats a link array ([node, slot]) as a filename
+pass extract: UI-format graph yields no refs (gate becomes a no-op, fail open)
+pass readEnum: classic shape [[files], {}]
+pass readEnum: COMBO shape ['COMBO', {options}] — the silent fail-open landmine
+pass positive: models present → prompt is queued
+pass positive: the POST actually happened
+pass missing file: throws ModelPreflightError
+pass missing file: message names the FILE
+pass missing file: message names the WORKER
+pass missing file: message names the SUBDIR
+pass missing file: NOTHING was queued (proved from the mock's request log)
+pass missing node: throws (graph cannot run on this worker at all)
+pass missing node: message says the NODE TYPE is not installed
+pass missing node: NOTHING was queued
+[FrameForge] model preflight: 1/1 ref(s) undeterminable on http://127.0.0.1:61576 — dispatching anyway (fail-open)
+pass degradation: unreachable /object_info does NOT block (fail open)
+pass degradation: unreachable probe is reported undeterminable, ok stays true
+pass kill switch: FRAMEFORGE_MODEL_PREFLIGHT=off probes nothing
+pass kill switch: dispatch proceeds untouched
+pass spaced class_type: probed as /object_info/RIFE%20VFI
+
+ALL CHECKS PASS

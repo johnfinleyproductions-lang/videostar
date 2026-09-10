@@ -8,6 +8,8 @@
 // src/lib/fleet.ts: pickWorker(resolveWorkerForLane(kind)) at dispatch,
 // getWorkerComfyBase(item.worker) when polling/proxying an existing job.
 
+import { assertModelsPresent } from "./model-preflight";
+
 interface ComfyUIPromptResponse {
   prompt_id: string;
   number: number;
@@ -101,6 +103,15 @@ export async function queuePrompt(
   workflow: Record<string, unknown>,
   clientId: string
 ): Promise<ComfyUIPromptResponse> {
+  // MODEL PREFLIGHT (ticket comfy-workflow-model-preflight). Every dispatch in
+  // the app funnels through this one function with the ALREADY-RESOLVED worker
+  // base — the only place where "does this box actually have these files?" is
+  // a meaningful question, since the two-comfy landmine IS a graph checked
+  // against the wrong ComfyUI. Throws ModelPreflightError (mapped to 503 by the
+  // routes) only on a definitive miss; any failure to probe degrades to a
+  // warning and dispatches exactly as before.
+  await assertModelsPresent(base, workflow);
+
   const res = await fetch(`${base}/prompt`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
