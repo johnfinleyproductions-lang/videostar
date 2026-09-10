@@ -98,6 +98,10 @@ export type VideoProfileKind =
   | "ltx25-template"
   | "hv-template"
   | "minimax-h3"
+  // MiniMax-H3 Reference-to-Video on the comfy-master gm instance (:8193)
+  // — distinct kind so the fleet routes it to the vidbox-gm worker (the
+  // R2V ref slots, GuideMaster pins and neural latent upscaler live there).
+  | "minimax-h3-r2v"
   | "ltx-sidecar"
   | "svi-chain"
   | "ltx-desktop"

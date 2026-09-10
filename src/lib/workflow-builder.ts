@@ -2499,3 +2499,267 @@ export function buildSviChain(params: SviChainBuildParams): {
     extra_data: { seed, length: 81 * beats.length, width, height },
   };
 }
+
+
+// ---------------------------------------------------------------------------
+// MiniMax-H3 Reference-to-Video (lane H3-R2V — gm instance, :8193)
+// ---------------------------------------------------------------------------
+// Template: h3_r2v.json (int8 ref2va unet + ref2v turbo LoRA @ 8 steps,
+// fp16 video VAE — NEVER the int8 VAE, it decodes black). The builder wires
+// 1-4 reference LoadImages onto the R2V node's dotted autogrow inputs,
+// optionally inserts MajoorH3GuideMaster between the R2V outputs and the
+// guider/sampler (keyframe pins), and for the 1080p finalize tier swaps the
+// decode chain for: separate AV latent -> neural 2x latent upscale ->
+// concat -> SigmaShift(12,3) + euler partial-denoise refine -> one decode.
+// Recipe provenance: evergreen-core docs/qa/h3-r2v (proven 2026-08-28/29).
+
+export const H3_R2V_TEMPLATE_TITLES = {
+  video: "FF R2V",
+  seed: "FF Seed",
+  lora: "FF Lora",
+  videoVae: "FF VideoVAE",
+  audioVae: "FF AudioVAE",
+  guider: "FF Guider",
+  sampler: "FF Sampler",
+  decode: "FF Decode",
+  audioDecode: "FF AudioDecode",
+  createVideo: "FF CreateVideo",
+  save: "FF SaveVideo",
+} as const;
+
+export interface H3R2VGuideImage {
+  /** ComfyUI input-dir image ref (already uploaded to the gm box). */
+  name: string;
+  /** 0-based frame on the 24fps timeline (GuideMaster snaps to the grid). */
+  frame: number;
+}
+
+export interface H3R2VBuildParams {
+  template: ComfyWorkflow;
+  prompt: string;
+  /** 1-4 uploaded input-dir refs, in <Picture i> order. */
+  refImageNames: string[];
+  guideImages?: H3R2VGuideImage[];
+  length: number;
+  seed: number;
+  width?: number;
+  height?: number;
+  /** h3-r2v-1080p: append the latent-upscale + refine chain. */
+  finalize1080?: boolean;
+}
+
+export function buildH3R2V(params: H3R2VBuildParams): {
+  prompt: ComfyWorkflow;
+  extra_data: { seed: number; length: number; width?: number; height?: number };
+} {
+  const {
+    template,
+    prompt,
+    refImageNames,
+    guideImages = [],
+    length,
+    seed,
+    width,
+    height,
+    finalize1080 = false,
+  } = params;
+
+  if (refImageNames.length < 1 || refImageNames.length > 4) {
+    throw new Error(
+      `h3-r2v takes 1-4 reference images (got ${refImageNames.length})`,
+    );
+  }
+  if (guideImages.length > 4) {
+    throw new Error(`h3-r2v takes at most 4 keyframe pins (got ${guideImages.length})`);
+  }
+
+  const workflow = JSON.parse(JSON.stringify(template)) as ComfyWorkflow;
+  const legalLength = validateH3FrameGrid(length);
+  const snap32 = (value: number) => Math.max(32, Math.round(value / 32) * 32);
+
+  const videoPatch: Record<string, unknown> = { prompt, length: legalLength };
+  if (typeof width === "number" && width > 0) videoPatch.width = snap32(width);
+  if (typeof height === "number" && height > 0) {
+    videoPatch.height = snap32(height);
+  }
+
+  applyTitlePatches(workflow, {
+    [H3_R2V_TEMPLATE_TITLES.video]: videoPatch,
+    [H3_R2V_TEMPLATE_TITLES.seed]: { noise_seed: seed },
+  });
+
+  const mustFind = (title: string) => {
+    const found = findNodeByTitle(workflow, title);
+    if (!found) {
+      throw new Error(`h3_r2v template is missing its "${title}" node`);
+    }
+    return found;
+  };
+  const videoNode = mustFind(H3_R2V_TEMPLATE_TITLES.video);
+  const guiderNode = mustFind(H3_R2V_TEMPLATE_TITLES.guider);
+  const samplerNode = mustFind(H3_R2V_TEMPLATE_TITLES.sampler);
+  const videoVae = mustFind(H3_R2V_TEMPLATE_TITLES.videoVae);
+  const audioVae = mustFind(H3_R2V_TEMPLATE_TITLES.audioVae);
+  const loraNode = mustFind(H3_R2V_TEMPLATE_TITLES.lora);
+  const saveNode = mustFind(H3_R2V_TEMPLATE_TITLES.save);
+
+  // 1-4 reference images -> the R2V node's dotted autogrow inputs.
+  refImageNames.forEach((name, i) => {
+    const nid = String(90 + i);
+    workflow[nid] = {
+      class_type: "LoadImage",
+      inputs: { image: name },
+      _meta: { title: `FF Ref ${i + 1}` },
+    };
+    videoNode.node.inputs[`ref_images.ref_image_${i}`] = [nid, 0];
+  });
+
+  // Optional GuideMaster keyframe pins: a pure conditioning pass-through
+  // between the R2V outputs and the guider/sampler (the latent is untouched;
+  // pins ride the conditioning as minimax_keyframes).
+  let condSource: [string, number] = [videoNode.id, 0];
+  let latentSource: [string, number] = [videoNode.id, 1];
+  if (guideImages.length > 0) {
+    const guideInputs: Record<string, unknown> = {
+      positive: condSource,
+      latent: latentSource,
+      vae: [videoVae.id, 0],
+      frame_count: legalLength,
+      timeline_json: JSON.stringify({
+        version: 2,
+        fps: 24,
+        timeline: { frame_count: legalLength, selected_frame: 0 },
+        guides: guideImages.map((g, i) => ({
+          id: `g${i + 1}`,
+          enabled: true,
+          frame: Math.max(0, Math.min(Math.round(g.frame), legalLength - 1)),
+          image_slot: i,
+          audio_slot: null,
+        })),
+      }),
+    };
+    guideImages.forEach((g, i) => {
+      const nid = String(85 + i);
+      workflow[nid] = {
+        class_type: "LoadImage",
+        inputs: { image: g.name },
+        _meta: { title: `FF Guide ${i + 1}` },
+      };
+      guideInputs[`guide_images.guide_image_${i}`] = [nid, 0];
+    });
+    workflow["80"] = {
+      class_type: "MajoorH3GuideMaster",
+      inputs: guideInputs,
+      _meta: { title: "FF GuideMaster" },
+    };
+    condSource = ["80", 0];
+    latentSource = ["80", 1];
+  }
+  guiderNode.node.inputs.conditioning = condSource;
+  samplerNode.node.inputs.latent_image = latentSource;
+
+  // 1080p finalize: drop the preview decode chain and route the sampled AV
+  // latent through the neural upscaler + refine before the single decode.
+  if (finalize1080) {
+    const decodeNode = mustFind(H3_R2V_TEMPLATE_TITLES.decode);
+    const audioDecodeNode = mustFind(H3_R2V_TEMPLATE_TITLES.audioDecode);
+    const createVideoNode = mustFind(H3_R2V_TEMPLATE_TITLES.createVideo);
+    delete workflow[decodeNode.id];
+    delete workflow[audioDecodeNode.id];
+    delete workflow[createVideoNode.id];
+
+    workflow["30"] = {
+      class_type: "LTXVSeparateAVLatent",
+      inputs: { av_latent: [samplerNode.id, 0] },
+      _meta: { title: "FF SeparateAV" },
+    };
+    workflow["31"] = {
+      class_type: "MinimaxH3LatentUpscaler3D",
+      inputs: {
+        latent: ["30", 0],
+        model_name: "minimax_h3_latent_upscaler_3d_fp16.safetensors",
+        mode: "scale by multiplier",
+        "mode.scale": 2.0,
+        align: 32,
+        enable_temporal_chunking: false,
+        force_unload: true,
+        device: "cuda",
+        precision: "fp16",
+      },
+      _meta: { title: "FF LatentUpscale" },
+    };
+    workflow["32"] = {
+      class_type: "LTXVConcatAVLatent",
+      inputs: { video_latent: ["31", 0], audio_latent: ["30", 1] },
+      _meta: { title: "FF ConcatAV" },
+    };
+    workflow["33"] = {
+      class_type: "MiniMaxH3SigmaShift",
+      inputs: { model: [loraNode.id, 0], shift_video: 12.0, shift_audio: 3.0 },
+      _meta: { title: "FF RefineShift" },
+    };
+    workflow["34"] = {
+      class_type: "ManualSigmas",
+      inputs: { sigmas: "0.9035, 0.6316, 0.3158, 0.0000" },
+      _meta: { title: "FF RefineSigmas" },
+    };
+    workflow["35"] = {
+      class_type: "BasicGuider",
+      inputs: { model: ["33", 0], conditioning: condSource },
+      _meta: { title: "FF RefineGuider" },
+    };
+    workflow["36"] = {
+      class_type: "RandomNoise",
+      inputs: { noise_seed: seed },
+      _meta: { title: "FF RefineNoise" },
+    };
+    workflow["37"] = {
+      class_type: "KSamplerSelect",
+      inputs: { sampler_name: "euler" },
+      _meta: { title: "FF RefineSampler" },
+    };
+    workflow["38"] = {
+      class_type: "SamplerCustomAdvanced",
+      inputs: {
+        noise: ["36", 0],
+        guider: ["35", 0],
+        sampler: ["37", 0],
+        sigmas: ["34", 0],
+        latent_image: ["32", 0],
+      },
+      _meta: { title: "FF RefineRun" },
+    };
+    workflow["39"] = {
+      class_type: "VAEDecode",
+      inputs: { samples: ["38", 0], vae: [videoVae.id, 0] },
+      _meta: { title: "FF FinalDecode" },
+    };
+    workflow["40"] = {
+      class_type: "VAEDecodeAudio",
+      inputs: { samples: ["38", 0], vae: [audioVae.id, 0] },
+      _meta: { title: "FF FinalAudioDecode" },
+    };
+    workflow["41"] = {
+      class_type: "CreateVideo",
+      inputs: { images: ["39", 0], audio: ["40", 0], fps: 24 },
+      _meta: { title: "FF FinalCreateVideo" },
+    };
+    saveNode.node.inputs.video = ["41", 0];
+  }
+
+  const genWidth =
+    typeof videoPatch.width === "number" ? (videoPatch.width as number) : undefined;
+  const genHeight =
+    typeof videoPatch.height === "number"
+      ? (videoPatch.height as number)
+      : undefined;
+  return {
+    prompt: workflow,
+    extra_data: {
+      seed,
+      length: legalLength,
+      width: finalize1080 && genWidth ? genWidth * 2 : genWidth,
+      height: finalize1080 && genHeight ? genHeight * 2 : genHeight,
+    },
+  };
+}

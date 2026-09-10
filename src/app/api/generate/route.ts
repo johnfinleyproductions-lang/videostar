@@ -35,6 +35,7 @@ import {
   buildLtxTemplate,
   buildMatAnyone,
   buildMiniMaxH3,
+  buildH3R2V,
   buildSviChain,
   buildVaceInpaint,
   buildVaceRef,
@@ -1690,6 +1691,150 @@ export async function POST(request: NextRequest) {
     // start/end stills switch t2va → fl2va keyframing. Audio is intrinsic —
     // the mp4 always carries the generated stereo track. Never RIFE'd (the
     // /api/status post gate only fires for wan-i2v/wan-vace kinds).
+    // ------------------------------------------------------------------
+    // MiniMax-H3 Reference-to-Video lane (vidbox-gm worker, :8193)
+    // ------------------------------------------------------------------
+    // Up to 4 refs bound by <Picture i> tags: imageUrl is ALWAYS <Picture 1>
+    // (a storyboard grid there is executed panel-by-panel); refs 2-4 arrive
+    // as refImage2Url..refImage4Url (Base64/Path forms accepted). Optional
+    // GuideMaster keyframe pins: guideImageNUrl + guideFrameN (an image
+    // without its frame is a 400 — a pin landing at frame 0 by accident
+    // would silently rewrite the opening shot). h3-r2v-1080p re-generates
+    // the passed seed deterministically and latent-upscales it to true
+    // 1920x1088, so its length caps at 209 frames (2MP refine VRAM).
+    if (modelProfile.kind === "minimax-h3-r2v") {
+      if (!imageName) {
+        return NextResponse.json(
+          {
+            error:
+              "H3-R2V requires at least one reference image — imageUrl is <Picture 1> (character ref or storyboard grid); add refImage2Url..refImage4Url for more.",
+          },
+          { status: 400 },
+        );
+      }
+      const refNames: string[] = [imageName];
+      for (const n of [2, 3, 4]) {
+        const src = await resolveImageBuffer(
+          {
+            url: body[`refImage${n}Url`],
+            base64: body[`refImage${n}Base64`],
+            path: body[`refImage${n}Path`],
+          },
+          `ref${n}`,
+        );
+        if (src) {
+          const uploaded = await uploadInputImage(
+            comfyBase,
+            src.buffer,
+            src.filename,
+            `jobs/${id}`,
+          );
+          refNames.push(uploaded.imageRef);
+        }
+      }
+      const guideImages: { name: string; frame: number }[] = [];
+      for (const n of [1, 2, 3, 4]) {
+        const src = await resolveImageBuffer(
+          {
+            url: body[`guideImage${n}Url`],
+            base64: body[`guideImage${n}Base64`],
+            path: body[`guideImage${n}Path`],
+          },
+          `guide${n}`,
+        );
+        if (!src) continue;
+        const frame = Number(body[`guideFrame${n}`]);
+        if (!Number.isFinite(frame) || frame < 0) {
+          return NextResponse.json(
+            {
+              error: `guideImage${n} needs a matching guideFrame${n} (0-based frame index on the 24fps timeline)`,
+            },
+            { status: 400 },
+          );
+        }
+        const uploaded = await uploadInputImage(
+          comfyBase,
+          src.buffer,
+          src.filename,
+          `jobs/${id}`,
+        );
+        guideImages.push({ name: uploaded.imageRef, frame: Math.round(frame) });
+      }
+
+      const finalize1080 = modelProfile.id === "h3-r2v-1080p";
+      const h3Fps = modelProfile.fps ?? 24;
+      const genWidth = body.width || modelProfile.defaultWidth || 1344;
+      const genHeight = body.height || modelProfile.defaultHeight || 768;
+      const length = body.duration
+        ? validateH3FrameGrid(Math.round(body.duration * h3Fps))
+        : (modelProfile.defaultLength ?? 124);
+      if (finalize1080 && length > 209) {
+        return NextResponse.json(
+          {
+            error: `h3-r2v-1080p caps at 209 frames (~8.7s) — the 2MP refine must fit the 32GB card (proven at 124). Got ${length}; render longer rolls on h3-r2v at 1MP instead.`,
+          },
+          { status: 400 },
+        );
+      }
+      const seed = req.seed ?? Math.floor(Math.random() * 2147483647);
+
+      const template = loadTemplate(modelProfile.templateFile ?? "h3_r2v.json");
+      const workflow = buildH3R2V({
+        template,
+        prompt: req.prompt,
+        refImageNames: refNames,
+        guideImages,
+        length,
+        seed,
+        width: genWidth,
+        height: genHeight,
+        finalize1080,
+      });
+
+      const clientId = uuidv4();
+      const comfyResponse = await queuePrompt(
+        comfyBase,
+        workflow.prompt as unknown as Record<string, unknown>,
+        clientId,
+      );
+
+      const outWidth = workflow.extra_data.width ?? genWidth;
+      const outHeight = workflow.extra_data.height ?? genHeight;
+      const item: VideoGenerationItem = {
+        id,
+        status: "processing",
+        prompt: req.prompt,
+        comfyPromptId: comfyResponse.prompt_id,
+        width: outWidth,
+        height: outHeight,
+        fps: h3Fps,
+        frames: workflow.extra_data.length,
+        duration: framesToDuration(workflow.extra_data.length, h3Fps),
+        resolution: `${outWidth}x${outHeight}`,
+        seed,
+        model: modelProfile.id,
+        modelName: modelProfile.name,
+        worker: worker.name,
+        createdAt: new Date().toISOString(),
+        sourceImageUrl: imageName
+          ? typeof body.imageUrl === "string" && body.imageUrl
+            ? body.imageUrl
+            : imageName
+          : undefined,
+        progress: 0,
+        stage: "main",
+      };
+
+      await addToHistory(item);
+
+      return NextResponse.json({
+        id,
+        comfyPromptId: comfyResponse.prompt_id,
+        clientId,
+        status: "processing",
+      });
+    }
+
     if (modelProfile.kind === "minimax-h3") {
       const h3Fps = modelProfile.fps ?? 24;
       const h3Width = body.width || modelProfile.defaultWidth || 1344;

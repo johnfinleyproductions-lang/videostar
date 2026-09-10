@@ -11,9 +11,18 @@
 // today's deployed env, COMFYUI_URL=http://127.0.0.1:8188 and neither
 // FRAMERSTATION_COMFYUI_URL nor THINK_COMFYUI_URL set — every code path
 // behaves exactly like the single-base production build: one candidate per
-// lane (vidbox), no availability ping (single-candidate selection short-
-// circuits), the same bases, the same URLs. History items WITHOUT a `worker`
-// field (all pre-fleet history) resolve to the default worker.
+// lane (vidbox), the same bases, the same URLs. History items WITHOUT a
+// `worker` field (all pre-fleet history) resolve to the default worker.
+//
+// ONE DOCUMENTED EXCEPTION (2026-09-07, mode-switch review F-10): the single
+// non-exclusive candidate path now pings /system_stats once before returning.
+// Since vidbox went single-tenant (2026-09-05) a `code`/`agent` mode takes the
+// WHOLE render plane down on purpose, and that surfaced as an opaque 500
+// ("fetch failed") from the queue call — the operator could not tell a mode
+// switch from a crashed box. The ping only CHANGES the outcome when the box is
+// down AND the switch state file names a non-video owner; a healthy box still
+// dispatches exactly as before, and a box that is down in video mode still
+// gets today's legacy error surface. See readVidboxMode below.
 //
 // A worker is ENABLED iff its comfyBase is set. vidbox always has a base
 // (COMFYUI_URL || http://127.0.0.1:8188 — IMPORTANT: 127.0.0.1, never
@@ -34,6 +43,8 @@
 // omitted fields keep the embedded value); unknown names append new workers.
 // Invalid JSON is logged and ignored — a bad override must never take down
 // dispatching.
+
+import { readFile } from "node:fs/promises";
 
 export interface FleetWorker {
   /** Stable worker name — the value stamped into history (never a URL). */
@@ -77,6 +88,106 @@ export class FleetWorkerUnavailableError extends Error {
     this.name = "FleetWorkerUnavailableError";
     this.workerName = worker.name;
   }
+}
+
+/**
+ * The ONE command that brings the render plane back. vidbox is single-tenant
+ * (ops/vidbox/README.md, "Single-tenant mode switch"): whatever owns the GPUs
+ * evicted everything else to get them, so restarting a single ComfyUI by hand
+ * is wrong — the older `schtasks` / `tmux new -s comfy-gm` runbook lines
+ * BYPASS the switch. Going through the switch evicts the current tenant and
+ * brings all three ComfyUIs back together.
+ */
+export const RESTORE_VIDEO_MODE_HINT =
+  "Restore video mode on vidbox: powershell -NoProfile -ExecutionPolicy " +
+  "Bypass -File C:\\Users\\evergreen\\vidbox-mode.ps1 video";
+
+/** The mode whose tenant IS the render plane; any other owner means no ComfyUI. */
+const VIDEO_MODE_OWNER = "video";
+
+/** Switch state file written by vidbox-mode.ps1 (UTF-8, no BOM, CRLF). */
+const DEFAULT_VIDBOX_MODE_FILE = "C:\\Users\\evergreen\\evergreen-mode.json";
+
+/** The subset of the switch state file this app needs. */
+export interface VidboxModeState {
+  /** Who last WON the GPUs — "video" | "code" | "agent" | "clean". */
+  owner: string;
+  /** Who asked for the switch (user@host, or a Core runtime-target actor). */
+  by?: string;
+  /** ISO timestamp of the last completed switch. */
+  updatedAt?: string;
+}
+
+/**
+ * Read the single-tenant switch state, or null when it cannot be trusted.
+ *
+ * Deliberately total: a missing file (dev boxes, CI, any non-vidbox host), an
+ * unreadable file, malformed JSON, or a blank `owner` all return null and the
+ * caller keeps today's behavior. This must never be able to fail a dispatch —
+ * it only ever ADDS an explanation to a failure that already happened.
+ */
+export async function readVidboxMode(): Promise<VidboxModeState | null> {
+  const file = process.env.VIDBOX_MODE_FILE?.trim() || DEFAULT_VIDBOX_MODE_FILE;
+  try {
+    const raw = await readFile(file, "utf8");
+    // Strip a BOM defensively — the file is rewritten by PowerShell on every
+    // switch and BOM behavior differs across PowerShell versions.
+    const parsed: unknown = JSON.parse(raw.replace(/^\uFEFF/, ""));
+    if (!parsed || typeof parsed !== "object") return null;
+    const state = parsed as Record<string, unknown>;
+    const owner = typeof state.owner === "string" ? state.owner.trim() : "";
+    if (!owner) return null;
+    return {
+      owner,
+      by: typeof state.by === "string" && state.by.trim() ? state.by.trim() : undefined,
+      updatedAt:
+        typeof state.updatedAt === "string" && state.updatedAt.trim()
+          ? state.updatedAt.trim()
+          : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Thrown when a worker is unreachable BECAUSE vidbox is in a non-video tenant
+ * mode — the box is fine, it is just not running ComfyUI right now.
+ *
+ * Extends FleetWorkerUnavailableError on purpose: the generate/finish routes
+ * already map that type to an honest 503, so naming the mode costs no new
+ * error contract. Never thrown while the switch says `video` — a genuinely
+ * crashed ComfyUI in video mode keeps its existing error surface.
+ */
+export class VidboxModeUnavailableError extends FleetWorkerUnavailableError {
+  readonly mode: string;
+
+  constructor(worker: FleetWorker, state: VidboxModeState, lane?: string) {
+    super(worker, lane);
+    const laneNote = lane ? ` for lane "${lane}"` : "";
+    const since = state.updatedAt ? ` since ${state.updatedAt}` : "";
+    const by = state.by ? ` (by ${state.by})` : "";
+    this.message =
+      `vidbox is in ${state.owner} mode${since}${by} — the render plane ` +
+      `(${worker.comfyBase}) is not running, so no job was dispatched` +
+      `${laneNote}. ${RESTORE_VIDEO_MODE_HINT}`;
+    this.name = "VidboxModeUnavailableError";
+    this.mode = state.owner;
+  }
+}
+
+/**
+ * Explain an unreachable worker with the switch state, or null when the state
+ * does not explain it (no readable file, or vidbox genuinely owns video mode
+ * and the box is simply broken — that keeps today's error surface).
+ */
+async function vidboxModeError(
+  worker: FleetWorker,
+  lane?: string,
+): Promise<VidboxModeUnavailableError | null> {
+  const state = await readVidboxMode();
+  if (!state || state.owner === VIDEO_MODE_OWNER) return null;
+  return new VidboxModeUnavailableError(worker, state, lane);
 }
 
 const FLEET_ENV_OVERRIDE = "FRAMEFORGE_FLEET";
@@ -123,8 +234,23 @@ function embeddedFleet(): FleetWorker[] {
       lanes: ["minimax-h3", "ltx-sidecar", "svi-chain"],
       exclusive: true,
       restartHint:
-        'Restart it on vidbox: schtasks /Run /TN "Evergreen ComfyUI Sidecar" ' +
+        `${RESTORE_VIDEO_MODE_HINT} ` +
         "(then retry once http://127.0.0.1:8190/system_stats answers).",
+    },
+    {
+      // H3 Reference-to-Video worker: the comfy-MASTER blue-green instance
+      // (~/ComfyUI-gm, loopback :8193, tmux "comfy-gm", v32 venv) — the only
+      // box with MiniMaxH3ReferenceToVideo + native AddGuide (GuideMaster
+      // pins) + the LBH-123-AI neural latent upscaler. Exclusive like the
+      // sidecar: if it is down the lane answers an honest 503 + runbook.
+      name: "vidbox-gm",
+      comfyBase:
+        cleanBase(process.env.GM_COMFYUI_URL) ?? "http://127.0.0.1:8193",
+      lanes: ["minimax-h3-r2v"],
+      exclusive: true,
+      restartHint:
+        `${RESTORE_VIDEO_MODE_HINT} ` +
+        "(then retry once http://127.0.0.1:8193/system_stats answers).",
     },
     {
       // FLUX stills + HV-HUMANS + MUSIC offload box (not active yet —
@@ -402,10 +528,12 @@ async function workerAnswers(worker: FleetWorker): Promise<boolean> {
 /**
  * Pick the dispatch worker from an ordered candidate list.
  *
- * Single NON-exclusive candidate (today's vidbox-only fleet): returned
- * immediately, NO availability ping — the request pattern stays
- * byte-identical to the pre-fleet build, and a down box surfaces exactly
- * today's queue error.
+ * Single NON-exclusive candidate (today's vidbox-only fleet): one
+ * /system_stats ping. It answers → returned, request pattern unchanged. It
+ * does NOT answer → the switch state decides the error: a non-video owner
+ * throws VidboxModeUnavailableError (route → 503 naming the mode and the one
+ * command that fixes it); anything else returns the worker anyway so a
+ * genuinely crashed box keeps exactly today's queue error.
  *
  * Single EXCLUSIVE candidate (a lane only one box can run): health-gated —
  * ping /system_stats; a dead worker THROWS FleetWorkerUnavailableError
@@ -429,9 +557,15 @@ export async function pickWorker(
   }
   if (candidates.length === 1) {
     const only = candidates[0];
-    if (!only.exclusive) return only;
     if (await workerAnswers(only)) return only;
-    throw new FleetWorkerUnavailableError(only, lane);
+    if (only.exclusive) throw new FleetWorkerUnavailableError(only, lane);
+    // Non-exclusive (the :8188 default worker). Before single-tenant mode a
+    // down box here just fell through to the queue call and 500'd "fetch
+    // failed"; that is still the right answer for a crash, but NOT when the
+    // box deliberately handed its GPUs to the coder/capacity lane.
+    const modeError = await vidboxModeError(only, lane);
+    if (modeError) throw modeError;
+    return only;
   }
 
   for (const worker of candidates) {

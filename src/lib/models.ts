@@ -56,6 +56,14 @@ export type VideoModelId =
   // MiniMax-H3 omni AV lane (33B fp8 on the v0.30 sidecar worker: video WITH
   // native stereo audio in one pass; explicit selection only, never a default)
   | "minimax-h3"
+  // MiniMax-H3 Reference-to-Video lanes (comfy-master gm instance :8193 via
+  // the vidbox-gm worker): up to 4 identity/environment/prop refs bound by
+  // <Picture i> tags + optional GuideMaster keyframe pins. draft = 0.5MP
+  // seed-hunt previews; 1080p = deterministic re-gen of a picked seed +
+  // neural 2x latent upscale + refine (true 1920x1088, one decode).
+  | "h3-r2v"
+  | "h3-r2v-draft"
+  | "h3-r2v-1080p"
   // SVI 2.0 Pro long-form chain (Stable-Video-Infinity rank-128 LoRA pair on
   // Wan 2.2 I2V, v0.30 sidecar worker: drift-free multi-beat chaining, one
   // prompt per 81-frame clip; explicit selection only, never a default)
@@ -767,6 +775,91 @@ export const VIDEO_MODEL_PROFILES: VideoModelProfile[] = [
     supportsEndImage: true,
   },
   {
+    // MiniMax-H3 REFERENCE-TO-VIDEO (proven 2026-08-28/29, recipe in
+    // evergreen-core docs/qa/h3-r2v): up to 4 reference images bound by
+    // 1-based <Picture i> prompt tags — character + prop + environment (+ a
+    // storyboard GRID read panel-by-panel for multi-shot rolls). int8 ref2va
+    // pruned unet + ref2v turbo 4-step LoRA @ 8 steps, fp16 video VAE (the
+    // int8 VAE decodes black — condemned), native stereo audio. Optional
+    // GuideMaster keyframe pins (guideImageNUrl + guideFrameN) land cuts on
+    // exact frames (style-dependent: hard-cut styles are frame-exact).
+    // Runs ONLY on the vidbox-gm worker (comfy master, :8193).
+    id: "h3-r2v",
+    name: "MiniMax H3 Reference-to-Video",
+    shortName: "H3 R2V",
+    description:
+      "Multi-entity reference conditioning WITH native audio: up to 4 refs (character/prop/environment/storyboard grid) bound by <Picture i> tags, identity held across multi-shot rolls. Optional GuideMaster keyframe pins for exact cuts. 1344x768 @ 24fps on the 17k+5 grid. Explicit selection; needs the gm instance (:8193).",
+    kind: "minimax-h3-r2v",
+    backend: "comfyui",
+    templateFile: "h3_r2v.json",
+    checkpoint: "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+    textEncoder: "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+    steps: 8,
+    videoCfg: 1,
+    audioCfg: 0,
+    includeAudio: true,
+    fps: 24,
+    defaultWidth: 1344,
+    defaultHeight: 768,
+    defaultLength: 124, // 17k+5 grid, ~5.2s @ 24fps (362 = 15s max trained)
+    requiresImage: true,
+    supportsEndImage: false,
+  },
+  {
+    // Seed-hunt preview tier: same recipe at 0.5MP (960x544) so 3 seeds cost
+    // ~1.5 full gens. Pass seed explicitly per preview; the picked seed goes
+    // to h3-r2v-1080p, which re-generates it DETERMINISTICALLY and latent-
+    // upscales — the picked sample itself ships, so this does NOT violate
+    // the sweep-at-final-settings rule (nothing is re-rolled).
+    id: "h3-r2v-draft",
+    name: "H3 R2V Seed-Hunt Draft",
+    shortName: "H3 R2V Draft",
+    description:
+      "0.5MP seed-hunt preview (960x544): generate 3 seeds cheap, pick one, promote the seed to h3-r2v-1080p for the finalize. Same refs/prompt contract as h3-r2v.",
+    kind: "minimax-h3-r2v",
+    backend: "comfyui",
+    templateFile: "h3_r2v.json",
+    checkpoint: "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+    textEncoder: "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+    steps: 8,
+    videoCfg: 1,
+    audioCfg: 0,
+    includeAudio: true,
+    fps: 24,
+    defaultWidth: 960,
+    defaultHeight: 544,
+    defaultLength: 124,
+    requiresImage: true,
+    supportsEndImage: false,
+  },
+  {
+    // Finalize tier: re-gen the hunted seed at 960x544 (deterministic), then
+    // LBH-123-AI neural 2x latent upscale + SigmaShift(12,3)/euler partial-
+    // denoise refine + single decode -> TRUE 1920x1088 with audio, ~5 min
+    // warm, 26GB peak. Saves time not VRAM (README-verified), so the length
+    // caps at 209 frames (~8.7s) — proven at 124. Long rolls stay 1MP.
+    id: "h3-r2v-1080p",
+    name: "H3 R2V 1080p Finalize",
+    shortName: "H3 R2V 1080p",
+    description:
+      "Finalize a hunted seed to true 1920x1088: deterministic re-gen at 960x544 + neural 2x latent upscale + refine, one decode, audio intact. Pass the picked seed. Caps at 209 frames (~8.7s); proven at 124.",
+    kind: "minimax-h3-r2v",
+    backend: "comfyui",
+    templateFile: "h3_r2v.json",
+    checkpoint: "minimax_h3_ref2va_pruned_int8_convrot + latent_upscaler_3d_fp16",
+    textEncoder: "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+    steps: 8,
+    videoCfg: 1,
+    audioCfg: 0,
+    includeAudio: true,
+    fps: 24,
+    defaultWidth: 960,
+    defaultHeight: 544,
+    defaultLength: 124,
+    requiresImage: true,
+    supportsEndImage: false,
+  },
+  {
     // SVI 2.0 Pro HERO chain — Stable-Video-Infinity (EPFL VITA) rank-128
     // high/low LoRA pair on Wan 2.2 I2V A14B, run on the v0.30 sidecar
     // worker (the pilot box, 2026-08-09). Drift-free long form: one prompt
@@ -1263,6 +1356,7 @@ export function resolveVideoModelId(
     known.kind !== "ltx-template" &&
     known.kind !== "ltx25-template" &&
     known.kind !== "minimax-h3" &&
+    known.kind !== "minimax-h3-r2v" &&
     known.kind !== "ltx-sidecar" &&
     known.kind !== "svi-chain" &&
     known.kind !== "hv-template" &&

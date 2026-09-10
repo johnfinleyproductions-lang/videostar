@@ -63,6 +63,7 @@ export type LaneKey =
   | "MUSIC"
   | "HV-HUMANS"
   | "MINIMAX-H3"
+  | "H3-R2V"
   | "SVI-CHAIN"
   | "LTX-I2V"
   | "LTX-BEATS"
@@ -573,6 +574,89 @@ export const LANES: readonly LaneDescriptor[] = [
     supportsAudio: profile("minimax-h3").includeAudio === true,
     outputFormat: "mp4",
     typicalRenderMinutes: 8,
+  },
+  {
+    // MiniMax-H3 REFERENCE-TO-VIDEO (lane 20, proven 2026-08-28/29 — full
+    // recipe in evergreen-core docs/qa/h3-r2v): the identity-consistency
+    // lane. Up to 4 reference images bound by 1-based <Picture i> prompt
+    // tags — character + prop + environment, or a multi-panel STORYBOARD
+    // GRID as <Picture 1> which H3 executes panel-by-panel (boards beat
+    // text timelines for shot fidelity). Optional GuideMaster keyframe
+    // pins land cuts on exact frames. Workflow: hunt seeds on the draft
+    // variant, pick, finalize the seed to true 1080p. Runs on the
+    // "vidbox-gm" fleet worker (comfy master, :8193, tmux comfy-gm).
+    laneKey: "H3-R2V",
+    title: "MiniMax H3 Reference-to-Video",
+    description:
+      "The identity-consistency lane WITH native audio: bind up to 4 refs by <Picture i> tags (imageUrl = <Picture 1>; a storyboard grid there is executed panel-by-panel). One character stays the same face across multi-shot rolls. Optional keyframe pins (guideImageNUrl + guideFrameN) for exact cuts. Hunt: 3 draft seeds -> pick -> h3-r2v-1080p finalize. Needs the gm instance (:8193).",
+    kind: "minimax-h3-r2v",
+    executor: "generate",
+    endpoint: "/api/generate",
+    modelId: "h3-r2v",
+    variants: [
+      {
+        modelId: "h3-r2v-draft",
+        when: "Seed hunting — 3 cheap 0.5MP previews (pass seed explicitly per gen), pick the winner, promote its seed to h3-r2v-1080p. The picked latent ships; nothing is re-rolled.",
+      },
+      {
+        modelId: "h3-r2v-1080p",
+        when: "Finalizing a hunted seed to TRUE 1920x1088 (deterministic re-gen + neural 2x latent upscale + refine, audio intact, ~5 min warm). Caps at 209 frames (~8.7s).",
+      },
+    ],
+    requiresImage: true,
+    acceptsImage: true,
+    textOnly: false,
+    supportsAudio: true,
+    outputFormat: "mp4",
+    typicalRenderMinutes: 10,
+    extraParams: [
+      {
+        name: "refImage2Url",
+        type: "string",
+        description:
+          "Reference image 2 (<Picture 2>) — http-fetchable URL (refImage2Base64/refImage2Path also accepted). imageUrl is always <Picture 1>.",
+      },
+      {
+        name: "refImage3Url",
+        type: "string",
+        description: "Reference image 3 (<Picture 3>) — same forms as refImage2Url.",
+      },
+      {
+        name: "refImage4Url",
+        type: "string",
+        description: "Reference image 4 (<Picture 4>) — same forms as refImage2Url.",
+      },
+      {
+        name: "guideImage1Url",
+        type: "string",
+        description:
+          "GuideMaster keyframe pin 1: a still placed at guideFrame1 on the 24fps timeline (frames snap to the 17k+5 grid). Requires guideFrame1. guideImage2-4Url + guideFrame2-4 add up to 4 pins.",
+      },
+      {
+        name: "guideFrame1",
+        type: "number",
+        description:
+          "0-based frame index for guideImage1Url (e.g. shot boundaries 73/141/209/277 on a 362-frame roll).",
+      },
+      {
+        name: "guideImage2Url",
+        type: "string",
+        description: "Keyframe pin 2 (requires guideFrame2).",
+      },
+      { name: "guideFrame2", type: "number", description: "Frame index for pin 2." },
+      {
+        name: "guideImage3Url",
+        type: "string",
+        description: "Keyframe pin 3 (requires guideFrame3).",
+      },
+      { name: "guideFrame3", type: "number", description: "Frame index for pin 3." },
+      {
+        name: "guideImage4Url",
+        type: "string",
+        description: "Keyframe pin 4 (requires guideFrame4).",
+      },
+      { name: "guideFrame4", type: "number", description: "Frame index for pin 4." },
+    ],
   },
   {
     // SVI 2.0 Pro long-form chain (pilot-proven 2026-08-09): drift-free
