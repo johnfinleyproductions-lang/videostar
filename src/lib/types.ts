@@ -96,6 +96,11 @@ export type VideoProfileKind =
   // LTX 2.5 int8 template lane — same builder path as "ltx-template" but a
   // distinct kind so the fleet routes it to the ComfyUI-v32 instance (:8192).
   | "ltx25-template"
+  // Wan-Animate 2 virtual-actor lane — a DRIVING video + one character still
+  // → that character performing the driver's motion. Distinct kind because it
+  // is the only lane taking a video AND an image, and because the status
+  // route must never RIFE it (the output inherits the driver's fps).
+  | "wan-animate"
   | "hv-template"
   | "minimax-h3"
   // MiniMax-H3 Reference-to-Video on the comfy-master gm instance (:8193)

@@ -33,6 +33,10 @@ export type VideoModelId =
   // alpha webm, no green screen; transform lane — explicit selection only,
   // never a default)
   | "matanyone-matte"
+  // Wan-Animate 2 VIRTUAL ACTOR lane: a driving performance video + one
+  // character still → the character performing that motion. Explicit
+  // selection only, never a default.
+  | "wan-animate2"
   // HunyuanVideo-Foley FOLEY lane (an existing — usually silent — clip +
   // optional text hint → the same clip as an mp4 with synchronized 48kHz
   // SFX/ambience muxed on; transform-of-footage lane — explicit selection
@@ -455,6 +459,41 @@ export const VIDEO_MODEL_PROFILES: VideoModelProfile[] = [
     defaultHeight: 480,
     defaultLength: 81, // 4n+1 grid, ~5s @ 16fps
     requiresImage: false,
+    supportsEndImage: false,
+  },
+  {
+    // WAN-ANIMATE — the VIRTUAL ACTOR lane. A driving performance video plus
+    // ONE character still: the character performs the driver's motion.
+    //
+    // What it is NOT: it does not invent a performance. pose_strength 1.0
+    // transfers the driver's motion verbatim, so a flat read in the driver is
+    // a flat read out. It fixes APPEARANCE, not delivery.
+    //
+    // The graph has no background_video and no character_mask (the older
+    // WanAnimateToVideo node does; WanAnimate2ToVideo does not), so the frame
+    // is regenerated and the driver's real background does NOT survive. To
+    // keep a real plate, matte the output and composite.
+    //
+    // fps and audio are link-wired from the driving video, so the render
+    // inherits both — nothing is resampled, and the status route must never
+    // submit a RIFE post job for this kind.
+    id: "wan-animate2",
+    name: "Wan-Animate 2 (Virtual Actor)",
+    shortName: "Animate",
+    description:
+      "Virtual actor: a driving performance video + one character still → that character performing the same motion, at the driver's fps with the driver's audio. Requires BOTH videoUrl (the performance) and imageUrl (the character master). Regenerates the whole frame — the driver's background is not preserved. Distilled int8: 10 steps, cfg 1.0. 81 frames (~3.4s at 24fps) per pass.",
+    kind: "wan-animate",
+    backend: "comfyui",
+    templateFile: "wan_animate2.json",
+    checkpoint: "wan_animate_2_distill_int8_convrot.safetensors",
+    textEncoder: "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+    steps: 10,
+    videoCfg: 1.0,
+    audioCfg: 0,
+    // The driver's own track rides through CreateVideo.
+    includeAudio: true,
+    requiresImage: true,
+    requiresVideo: true,
     supportsEndImage: false,
   },
   {
@@ -1360,6 +1399,10 @@ export function resolveVideoModelId(
     known.kind !== "ltx-sidecar" &&
     known.kind !== "svi-chain" &&
     known.kind !== "hv-template" &&
+    // WAN-ANIMATE takes an image BY DESIGN (the character master) alongside
+    // its driving video. Without this it reroutes to the default I2V lane and
+    // silently renders an ordinary Wan clip instead — caught by smoke test.
+    known.kind !== "wan-animate" &&
     known.kind !== "ltx-desktop"
   ) {
     // Image present on a ComfyUI request → Wan 2.2 I2V lane per routing rule.
