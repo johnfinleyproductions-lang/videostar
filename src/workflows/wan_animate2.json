@@ -1,0 +1,281 @@
+{
+  "1": {
+    "class_type": "LoadVideo",
+    "inputs": {
+      "file": "example.mp4"
+    },
+    "_meta": {
+      "title": "FF Pose Video",
+      "note": "The DRIVING video: the performance whose motion is transferred onto the character. LoadVideo takes an input-dir ref (jobs/<id>/clip.mp4). Wan-Animate copies this performance \u2014 it cannot invent one, so a bad read in the driver is a bad read in the output."
+    }
+  },
+  "2": {
+    "class_type": "GetVideoComponents",
+    "inputs": {
+      "video": [
+        "1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "FF Video Components",
+      "note": "Splits the driving video into frames / audio / fps. fps (output 2) and audio (output 1) are link-wired straight into FF Create Video, so the OUTPUT INHERITS THE DRIVER'S FRAME RATE AND AUDIO \u2014 nothing is resampled and no rate is hardcoded."
+    }
+  },
+  "3": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {
+      "title": "FF Character Ref",
+      "note": "The character master: one still of the person to animate. Feeds both reference_image and the CLIP-vision encode. Identity is anchored to THIS frame, so keep one canonical still per character and reuse it for every shot."
+    }
+  },
+  "4": {
+    "class_type": "CLIPVisionLoader",
+    "inputs": {
+      "clip_name": "clip_vision_h.safetensors"
+    },
+    "_meta": {
+      "title": "FF CLIP Vision Loader",
+      "note": "clip_vision_h \u2014 the vision tower that turns the character still into an identity embedding."
+    }
+  },
+  "5": {
+    "class_type": "CLIPVisionEncode",
+    "inputs": {
+      "clip_vision": [
+        "4",
+        0
+      ],
+      "image": [
+        "3",
+        0
+      ],
+      "crop": "none"
+    },
+    "_meta": {
+      "title": "FF CLIP Vision",
+      "note": "Encodes the character ref. crop 'none' keeps the full frame; cropping here would re-frame the identity."
+    }
+  },
+  "6": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "wan_animate_2_distill_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "FF UNet",
+      "note": "Wan-Animate 2 distilled int8 (convrot). Distilled = the 10-step / cfg 1.0 recipe below; raising steps or cfg fights the distillation."
+    }
+  },
+  "7": {
+    "class_type": "WanAnimate2Cache",
+    "inputs": {
+      "model": [
+        "6",
+        0
+      ],
+      "device": "cpu",
+      "dtype": "default"
+    },
+    "_meta": {
+      "title": "FF Animate Cache",
+      "note": "Activation cache on CPU. device 'cpu' is the safe choice \u2014 'cuda' is faster but competes with the sampler for VRAM on a 32GB card."
+    }
+  },
+  "8": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan"
+    },
+    "_meta": {
+      "title": "FF Text Encoder",
+      "note": "umt5-xxl fp8 scaled, type 'wan'."
+    }
+  },
+  "9": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    },
+    "_meta": {
+      "title": "FF VAE",
+      "note": "wan 2.1 VAE \u2014 shared by the latent build and the decode."
+    }
+  },
+  "10": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "8",
+        0
+      ],
+      "text": ""
+    },
+    "_meta": {
+      "title": "FF Positive",
+      "note": "Patched by buildWanAnimate. Describes the SCENE and the character's appearance; the MOTION comes from the driving video, not from here."
+    }
+  },
+  "11": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "8",
+        0
+      ],
+      "text": "blurry, low quality, distorted face, extra limbs, watermark, text"
+    },
+    "_meta": {
+      "title": "FF Negative",
+      "note": "Patched by buildWanAnimate."
+    }
+  },
+  "12": {
+    "class_type": "WanAnimate2ToVideo",
+    "inputs": {
+      "positive": [
+        "10",
+        0
+      ],
+      "negative": [
+        "11",
+        0
+      ],
+      "vae": [
+        "9",
+        0
+      ],
+      "width": 832,
+      "height": 480,
+      "length": 81,
+      "batch_size": 1,
+      "video_frame_offset": 0,
+      "pose_strength": 1.0,
+      "pose_start_percent": 0.0,
+      "pose_end_percent": 1.0,
+      "reference_image_strength": 1.0,
+      "reference_image": [
+        "3",
+        0
+      ],
+      "pose_video": [
+        "2",
+        0
+      ],
+      "clip_vision_output": [
+        "5",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "FF Animate",
+      "note": "WanAnimate2ToVideo. width/height/length patched per request. NOTE: this node has NO background_video and NO character_mask input (the older WanAnimateToVideo does) \u2014 the frame is REGENERATED from the reference, so the driver's real background does not survive. Composite over a real plate with the MATTE lane if the background must be kept."
+    }
+  },
+  "13": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "7",
+        0
+      ],
+      "positive": [
+        "12",
+        0
+      ],
+      "negative": [
+        "12",
+        1
+      ],
+      "latent_image": [
+        "12",
+        2
+      ],
+      "seed": 12345,
+      "steps": 10,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    },
+    "_meta": {
+      "title": "FF Sampler",
+      "note": "Distilled recipe: 10 steps, cfg 1.0, euler/simple. seed patched per request."
+    }
+  },
+  "14": {
+    "class_type": "TrimVideoLatent",
+    "inputs": {
+      "samples": [
+        "13",
+        0
+      ],
+      "trim_amount": [
+        "12",
+        3
+      ]
+    },
+    "_meta": {
+      "title": "FF Trim",
+      "note": "Trims the latent by the offset WanAnimate2ToVideo reports (output 3)."
+    }
+  },
+  "15": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "14",
+        0
+      ],
+      "vae": [
+        "9",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "FF Decode"
+    }
+  },
+  "16": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "images": [
+        "15",
+        0
+      ],
+      "fps": [
+        "2",
+        2
+      ],
+      "audio": [
+        "2",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "FF Create Video",
+      "note": "fps and audio come from FF Video Components, so the render matches the driver exactly."
+    }
+  },
+  "17": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "video": [
+        "16",
+        0
+      ],
+      "filename_prefix": "FrameForge/wan_animate2",
+      "format": "auto",
+      "codec": "auto"
+    },
+    "_meta": {
+      "title": "FF Output",
+      "note": "SaveVideo. filename_prefix patched per request."
+    }
+  }
+}

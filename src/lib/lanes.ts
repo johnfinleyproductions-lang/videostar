@@ -56,6 +56,7 @@ export type LaneKey =
   | "LTX-MASTER"
   | "LIP-SYNC"
   | "LTX25-I2V"
+  | "WAN-ANIMATE"
   | "MG-TYPE"
   | "MG-ALPHA"
   | "MATTE"
@@ -394,6 +395,45 @@ export const LANES: readonly LaneDescriptor[] = [
     supportsAudio: profile("wan-alpha-rgba").includeAudio === true,
     outputFormat: "webm-alpha",
     typicalRenderMinutes: 10,
+  },
+  {
+    laneKey: "WAN-ANIMATE",
+    title: "Wan-Animate 2 (Virtual Actor)",
+    description:
+      "VIRTUAL ACTOR: a driving performance video + one character still \u2192 that character performing the same motion, rendered at the DRIVER'S fps with the driver's audio carried through. Requires BOTH videoUrl (the performance to copy) and imageUrl (the character master \u2014 keep one canonical still per character and reuse it every shot, that is what holds the identity). Motion is COPIED, not invented: pose_strength 1.0 transfers the driver verbatim, so this fixes appearance, never delivery \u2014 a flat read in is a flat read out. The frame is fully regenerated (no background_video / character_mask on this node), so the driver's real background does NOT survive; matte the result and composite if a real plate must be kept. Distilled int8, 10 steps, cfg 1.0, 81 frames (~3.4s at 24fps) per pass \u2014 chain passes for longer. Explicit selection only, never a default.",
+    kind: "wan-animate",
+    executor: "generate",
+    endpoint: "/api/generate",
+    modelId: "wan-animate2",
+    requiresImage: true,
+    acceptsImage: true,
+    textOnly: false,
+    supportsAudio: profile("wan-animate2").includeAudio === true,
+    outputFormat: "mp4",
+    typicalRenderMinutes: 6,
+    extraParams: [
+      {
+        name: "videoUrl",
+        type: "string",
+        required: true,
+        description:
+          "REQUIRED: the DRIVING performance \u2014 an http-fetchable mp4/webm whose motion is transferred onto the character. `video` (a ComfyUI input-dir ref like \"jobs/<id>/clip.mp4\", or an annotated \"<subfolder>/<file> [output]\" path to drive from one of our own renders) and videoPath are accepted alternatives. Output fps and audio are inherited from THIS clip.",
+      },
+      {
+        name: "poseStrength",
+        type: "number",
+        default: 1,
+        description:
+          "How hard the driver's motion is transferred (0..1, default 1.0 = verbatim). Lower it only to let the character drift off the driver; the distilled recipe is tuned for 1.0.",
+      },
+      {
+        name: "referenceStrength",
+        type: "number",
+        default: 1,
+        description:
+          "How strongly frames attend to the character still (0..1, default 1.0). Lower drifts off the likeness.",
+      },
+    ],
   },
   {
     laneKey: "MATTE",
