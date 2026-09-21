@@ -41,7 +41,9 @@ import {
   buildVaceInpaint,
   buildVaceRef,
   buildWanAlpha,
+  buildWanAnimate,
   buildWanI2V,
+  wanAnimateLength,
   VACE_IMAGE_MASK_RE,
   CAMERA_LIB_MOVES,
   durationToLegalFrames,
@@ -743,6 +745,10 @@ export async function POST(request: NextRequest) {
     // its own 15s cap — it gets its own branch below to keep the matte/VACE
     // logic untouched.
     const wantsFoley = requestedModel === "foley-sfx";
+    // WAN-ANIMATE is the only lane needing BOTH a driving video and a
+    // character still, so it joins the video-resolution block below AND keeps
+    // the normal image path.
+    const wantsWanAnimate = requestedModel === "wan-animate2";
     const laneLabel = wantsMatte
       ? "The MATTE lane (matanyone-matte)"
       : "The VACE edit lane (vace-inpaint)";
@@ -808,7 +814,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    if (wantsVaceEdit || wantsMatte) {
+    if (wantsVaceEdit || wantsMatte || wantsWanAnimate) {
       const videoSource = await resolveVideoRef(
         comfyBase,
         { url: body.videoUrl, path: body.videoPath, ref: body.video },
@@ -821,7 +827,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json(
           {
             error:
-              `${laneLabel} requires the ${wantsMatte ? "footage to matte" : "footage to edit"} — pass videoUrl (http-fetchable mp4/webm), videoPath (local file), or video (a ComfyUI input-dir ref like \"jobs/<id>/clip.mp4\" or an annotated \"<subfolder>/<file> [output]\" path to one of our own renders)`,
+              `${laneLabel} requires the ${wantsMatte ? "footage to matte" : wantsWanAnimate ? "driving performance" : "footage to edit"} — pass videoUrl (http-fetchable mp4/webm), videoPath (local file), or video (a ComfyUI input-dir ref like \"jobs/<id>/clip.mp4\" or an annotated \"<subfolder>/<file> [output]\" path to one of our own renders)`,
           },
           { status: 400 },
         );
@@ -1298,6 +1304,91 @@ export async function POST(request: NextRequest) {
     // "matte" ≠ "wan-i2v"/"wan-vace", so the status route never submits the
     // RIFE post job (its mp4 re-encode would destroy the alpha AND break
     // the source-fps continuity).
+    // Mirror of the builder's 16px snap so history reports what the graph
+    // will actually render, not the raw request.
+    const wanAnimateDimForHistory = (value: unknown, fallback: number) =>
+      Math.min(
+        1280,
+        Math.max(16, Math.round((typeof value === "number" && Number.isFinite(value) ? value : fallback) / 16) * 16),
+      );
+
+    if (modelProfile.kind === "wan-animate") {
+      // Both inputs are mandatory; the prerequisites above already 400 a
+      // missing one, this is belt-and-braces.
+      if (!videoName || !imageName) {
+        return NextResponse.json(
+          {
+            error:
+              "The WAN-ANIMATE lane needs BOTH the driving performance (videoUrl) and the character still (imageUrl)",
+          },
+          { status: 400 },
+        );
+      }
+
+      const template = loadTemplate(
+        modelProfile.templateFile ?? "wan_animate2.json",
+      );
+      const frames = wanAnimateLength(
+        typeof body.frames === "number" ? body.frames : undefined,
+      );
+      const workflow = buildWanAnimate({
+        template,
+        videoName,
+        referenceName: imageName,
+        positive: prompt,
+        negative: typeof body.negativePrompt === "string" ? body.negativePrompt : undefined,
+        width: typeof body.width === "number" ? body.width : undefined,
+        height: typeof body.height === "number" ? body.height : undefined,
+        frames,
+        seed: typeof body.seed === "number" ? body.seed : undefined,
+        poseStrength:
+          typeof body.poseStrength === "number" ? body.poseStrength : undefined,
+        referenceStrength:
+          typeof body.referenceStrength === "number" ? body.referenceStrength : undefined,
+        filenamePrefix: `FrameForge/wan_animate2_${id}`,
+      });
+
+      const clientId = uuidv4();
+      const comfyResponse = await queuePrompt(
+        comfyBase,
+        workflow as unknown as Record<string, unknown>,
+        clientId,
+      );
+
+      // fps and duration are INHERITED from the driving video inside the
+      // graph (GetVideoComponents -> CreateVideo), so this route never sets
+      // them and cannot know them at dispatch. Recording 0 says "not asserted
+      // here" rather than inventing a rate; the finished file carries the
+      // truth and frames below is the one number we do control.
+      const item: VideoGenerationItem = {
+        id,
+        status: "processing",
+        prompt,
+        comfyPromptId: comfyResponse.prompt_id,
+        width: wanAnimateDimForHistory(body.width, 832),
+        height: wanAnimateDimForHistory(body.height, 480),
+        fps: 0,
+        frames,
+        duration: 0,
+        resolution: `${wanAnimateDimForHistory(body.width, 832)}x${wanAnimateDimForHistory(body.height, 480)}`,
+        model: modelProfile.id,
+        modelName: modelProfile.name,
+        worker: worker.name,
+        createdAt: new Date().toISOString(),
+        sourceVideoUrl:
+          typeof body.videoUrl === "string" && body.videoUrl ? body.videoUrl : videoName,
+        progress: 0,
+        stage: "main",
+      };
+      await addToHistory(item);
+      return NextResponse.json({
+        id,
+        comfyPromptId: comfyResponse.prompt_id,
+        clientId,
+        status: "processing",
+      });
+    }
+
     if (modelProfile.kind === "matte") {
       if (!videoName) {
         // The prerequisites block already 400'd this; belt-and-suspenders.

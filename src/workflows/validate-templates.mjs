@@ -262,6 +262,26 @@ const TEMPLATES = {
   // flash (no audio, no stage-2, no end image). Node chain verified live on v32
   // 2026-08-12 (UNETLoader int8 / CLIPLoader "ltxv" Gemma-4 / VAELoader /
   // LTXVImgToVideoInplace), and rendered a 960x544x121 5.04s mp4 end-to-end.
+  // WAN-ANIMATE virtual-actor lane (wan_animate2.json) — patched by
+  // buildWanAnimate (see WAN_ANIMATE_TEMPLATE_TITLES). Node chain verified
+  // live on :8188 2026-09-11: all four weights present in the loader enums
+  // (wan_animate_2_distill_int8_convrot / clip_vision_h / umt5_xxl_fp8 /
+  // wan_2.1_vae) and WanAnimate2ToVideo + WanAnimate2Cache in /object_info.
+  //
+  // "FF Video Components" is REQUIRED because fps and audio are link-wired
+  // from it into FF Create Video — delete it and the render silently stops
+  // inheriting the driver's frame rate, which is the whole contract.
+  "wan_animate2.json": {
+    required: [
+      "FF Pose Video", "FF Video Components", "FF Character Ref",
+      "FF Positive", "FF Negative", "FF Animate", "FF Sampler",
+      "FF Create Video", "FF Output",
+    ],
+    // This lane is the Animate-2 node, which has no background/mask inputs.
+    // A template carrying the OLDER WanAnimateToVideo titles would be a
+    // different lane wearing this one's name.
+    forbidden: ["FF Background Video", "FF Character Mask", "FF Face Video"],
+  },
   "ltx25_i2v.json": {
     required: [
       "FF Positive", "FF Negative", "FF Start Image", "FF Seed",

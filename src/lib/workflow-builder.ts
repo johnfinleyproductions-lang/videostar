@@ -710,6 +710,105 @@ export function buildWanAlpha(params: WanAlphaBuildParams): {
  * Node titles the MATTE template must carry (validated by
  * src/workflows/validate-templates.mjs for matanyone.json).
  */
+/** Node titles in wan_animate2.json that buildWanAnimate patches. */
+export const WAN_ANIMATE_TEMPLATE_TITLES = {
+  /** LoadVideo — the driving performance. */
+  video: "FF Pose Video",
+  /** LoadImage — the character master still. */
+  reference: "FF Character Ref",
+  positive: "FF Positive",
+  negative: "FF Negative",
+  /** WanAnimate2ToVideo — size, length and the two strengths. */
+  animate: "FF Animate",
+  sampler: "FF Sampler",
+  output: "FF Output",
+} as const;
+
+/** Wan latents are 4n+1 frames; 81 is the distilled recipe's native length. */
+export const WAN_ANIMATE_DEFAULT_LENGTH = 81;
+export const WAN_ANIMATE_MAX_LENGTH = 161;
+
+/** Snap to the 4n+1 grid the Wan latent requires, then clamp. */
+export function wanAnimateLength(frames?: number): number {
+  if (frames === undefined || !Number.isFinite(frames)) {
+    return WAN_ANIMATE_DEFAULT_LENGTH;
+  }
+  const snapped = Math.round((frames - 1) / 4) * 4 + 1;
+  return Math.min(WAN_ANIMATE_MAX_LENGTH, Math.max(5, snapped));
+}
+
+/** WanAnimate2ToVideo takes width/height on a 16px grid. */
+function wanAnimateDim(value: number | undefined, fallback: number): number {
+  const raw = Number.isFinite(value) ? (value as number) : fallback;
+  return Math.min(1280, Math.max(16, Math.round(raw / 16) * 16));
+}
+
+export type WanAnimateBuildParams = {
+  template: ComfyWorkflow;
+  /** ComfyUI input-dir ref for the driving video. */
+  videoName: string;
+  /** ComfyUI input-dir ref for the character still. */
+  referenceName: string;
+  positive: string;
+  negative?: string;
+  width?: number;
+  height?: number;
+  frames?: number;
+  seed?: number;
+  poseStrength?: number;
+  referenceStrength?: number;
+  filenamePrefix?: string;
+};
+
+/**
+ * Patch wan_animate2.json for one virtual-actor pass.
+ *
+ * Deliberately does NOT touch fps or audio: both are link-wired from the
+ * driving video inside the graph, so the render always matches the driver.
+ * Nothing here can desync them.
+ */
+export function buildWanAnimate(params: WanAnimateBuildParams): ComfyWorkflow {
+  const { template, videoName, referenceName } = params;
+  if (!videoName) {
+    throw new Error("buildWanAnimate requires videoName (the driving performance)");
+  }
+  if (!referenceName) {
+    throw new Error("buildWanAnimate requires referenceName (the character still)");
+  }
+  const clamp01 = (value: number | undefined, fallback: number) =>
+    Number.isFinite(value) ? Math.min(1, Math.max(0, value as number)) : fallback;
+
+  const workflow = JSON.parse(JSON.stringify(template)) as ComfyWorkflow;
+  const T = WAN_ANIMATE_TEMPLATE_TITLES;
+
+  const patches: Record<string, Record<string, unknown>> = {
+    [T.video]: { file: videoName },
+    [T.reference]: { image: referenceName },
+    [T.positive]: { text: params.positive ?? "" },
+    [T.animate]: {
+      width: wanAnimateDim(params.width, 832),
+      height: wanAnimateDim(params.height, 480),
+      length: wanAnimateLength(params.frames),
+      pose_strength: clamp01(params.poseStrength, 1),
+      reference_image_strength: clamp01(params.referenceStrength, 1),
+    },
+    [T.sampler]: {
+      seed:
+        params.seed !== undefined && Number.isFinite(params.seed)
+          ? Math.floor(params.seed)
+          : Math.floor(Math.random() * 2_147_483_647),
+    },
+  };
+  if (params.negative !== undefined) {
+    patches[T.negative] = { text: params.negative };
+  }
+  if (params.filenamePrefix) {
+    patches[T.output] = { filename_prefix: params.filenamePrefix };
+  }
+  applyTitlePatches(workflow, patches);
+  return workflow;
+}
+
 export const MATTE_TEMPLATE_TITLES = {
   /** VHS_LoadVideo — the footage to matte (force_rate 0 = source fps). */
   load: "FF Load",
