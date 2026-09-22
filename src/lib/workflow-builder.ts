@@ -809,6 +809,95 @@ export function buildWanAnimate(params: WanAnimateBuildParams): ComfyWorkflow {
   return workflow;
 }
 
+// ---------------------------------------------------------------------------
+// Wan2.2-Animate V1 (Mix/Replace mode) — background-preserving identity swap
+// ---------------------------------------------------------------------------
+
+/** Node titles in wan_replace.json that buildWanReplace patches. */
+export const WAN_REPLACE_TEMPLATE_TITLES = {
+  /** LoadVideo — the driving performance AND the real plate to preserve. */
+  video: "FF Driving Video",
+  /** LoadImage — the new character's identity still. */
+  reference: "FF Character Ref",
+  /** LoadVideo — subject mask, frame-for-frame with the driving video (from MATTE). */
+  mask: "FF Mask Video",
+  positive: "FF Positive",
+  negative: "FF Negative",
+  /** WanAnimateToVideo (V1) — size, length; background_video/character_mask are
+   * link-wired in the template, not patched here. */
+  replace: "FF Replace",
+  sampler: "FF Sampler",
+  output: "FF Output",
+} as const;
+
+export type WanReplaceBuildParams = {
+  template: ComfyWorkflow;
+  /** ComfyUI input-dir ref for the driving/background video. */
+  videoName: string;
+  /** ComfyUI input-dir ref for the character still. */
+  referenceName: string;
+  /** ComfyUI input-dir ref for the subject mask video (white = subject). */
+  maskName: string;
+  positive: string;
+  negative?: string;
+  width?: number;
+  height?: number;
+  frames?: number;
+  seed?: number;
+  filenamePrefix?: string;
+};
+
+/**
+ * Patch wan_replace.json for one background-preserving replace pass.
+ *
+ * Deliberately does NOT touch fps or audio: both are link-wired from the
+ * driving video inside the graph (same contract as buildWanAnimate), so
+ * keep_original_audio is a plain passthrough with no model involved — the
+ * background (and its original audio) is composited, not regenerated.
+ */
+export function buildWanReplace(params: WanReplaceBuildParams): ComfyWorkflow {
+  const { template, videoName, referenceName, maskName } = params;
+  if (!videoName) {
+    throw new Error("buildWanReplace requires videoName (the driving performance + background plate)");
+  }
+  if (!referenceName) {
+    throw new Error("buildWanReplace requires referenceName (the new character still)");
+  }
+  if (!maskName) {
+    throw new Error("buildWanReplace requires maskName (the subject mask — e.g. from the MATTE lane)");
+  }
+
+  const workflow = JSON.parse(JSON.stringify(template)) as ComfyWorkflow;
+  const T = WAN_REPLACE_TEMPLATE_TITLES;
+
+  const patches: Record<string, Record<string, unknown>> = {
+    [T.video]: { file: videoName },
+    [T.reference]: { image: referenceName },
+    [T.mask]: { file: maskName },
+    [T.positive]: { text: params.positive ?? "" },
+    [T.replace]: {
+      // Reuses WAN-ANIMATE's own 16px/4n+1 grid helpers — same Wan latent shape.
+      width: wanAnimateDim(params.width, 848),
+      height: wanAnimateDim(params.height, 480),
+      length: wanAnimateLength(params.frames),
+    },
+    [T.sampler]: {
+      seed:
+        params.seed !== undefined && Number.isFinite(params.seed)
+          ? Math.floor(params.seed)
+          : Math.floor(Math.random() * 2_147_483_647),
+    },
+  };
+  if (params.negative !== undefined) {
+    patches[T.negative] = { text: params.negative };
+  }
+  if (params.filenamePrefix) {
+    patches[T.output] = { filename_prefix: params.filenamePrefix };
+  }
+  applyTitlePatches(workflow, patches);
+  return workflow;
+}
+
 export const MATTE_TEMPLATE_TITLES = {
   /** VHS_LoadVideo — the footage to matte (force_rate 0 = source fps). */
   load: "FF Load",

@@ -42,6 +42,7 @@ import {
   buildVaceRef,
   buildWanAlpha,
   buildWanAnimate,
+  buildWanReplace,
   buildWanI2V,
   wanAnimateLength,
   VACE_IMAGE_MASK_RE,
@@ -749,9 +750,16 @@ export async function POST(request: NextRequest) {
     // character still, so it joins the video-resolution block below AND keeps
     // the normal image path.
     const wantsWanAnimate = requestedModel === "wan-animate2";
+    // WAN-REPLACE needs a driving video AND a character still AND a mask —
+    // joins the same video-resolution block as vace-inpaint (so it gets the
+    // proven maskUrl/maskPath/mask resolution for free) plus the normal image
+    // path WAN-ANIMATE already uses.
+    const wantsWanReplace = requestedModel === "wan-replace";
     const laneLabel = wantsMatte
       ? "The MATTE lane (matanyone-matte)"
-      : "The VACE edit lane (vace-inpaint)";
+      : wantsWanReplace
+        ? "The WAN-REPLACE lane (wan-replace)"
+        : "The VACE edit lane (vace-inpaint)";
     let videoName: string | undefined;
     let maskName: string | undefined;
     let maskIsImage = false;
@@ -814,7 +822,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    if (wantsVaceEdit || wantsMatte || wantsWanAnimate) {
+    if (wantsVaceEdit || wantsMatte || wantsWanAnimate || wantsWanReplace) {
       const videoSource = await resolveVideoRef(
         comfyBase,
         { url: body.videoUrl, path: body.videoPath, ref: body.video },
@@ -827,7 +835,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json(
           {
             error:
-              `${laneLabel} requires the ${wantsMatte ? "footage to matte" : wantsWanAnimate ? "driving performance" : "footage to edit"} — pass videoUrl (http-fetchable mp4/webm), videoPath (local file), or video (a ComfyUI input-dir ref like \"jobs/<id>/clip.mp4\" or an annotated \"<subfolder>/<file> [output]\" path to one of our own renders)`,
+              `${laneLabel} requires the ${wantsMatte ? "footage to matte" : wantsWanAnimate || wantsWanReplace ? "driving performance" : "footage to edit"} — pass videoUrl (http-fetchable mp4/webm), videoPath (local file), or video (a ComfyUI input-dir ref like \"jobs/<id>/clip.mp4\" or an annotated \"<subfolder>/<file> [output]\" path to one of our own renders)`,
           },
           { status: 400 },
         );
@@ -843,10 +851,10 @@ export async function POST(request: NextRequest) {
       )?.ref;
       // resolveVideoRef returns null ONLY when no mask source was supplied
       // (a supplied-but-broken maskUrl/maskPath throws → 500 above); so a
-      // missing maskName here really means "omitted". VACE editing still
-      // requires it; the MATTE lane auto-derives the seed instead
-      // (buildMatAnyone: first loaded frame → BiRefNetRMBG person/subject
-      // mask → MatAnyone2.foreground_MASK).
+      // missing maskName here really means "omitted". VACE editing and
+      // WAN-REPLACE both require it; the MATTE lane auto-derives the seed
+      // instead (buildMatAnyone: first loaded frame → BiRefNetRMBG
+      // person/subject mask → MatAnyone2.foreground_MASK).
       if (!maskName && wantsVaceEdit) {
         return NextResponse.json(
           {
@@ -856,8 +864,26 @@ export async function POST(request: NextRequest) {
           { status: 400 },
         );
       }
+      if (!maskName && wantsWanReplace) {
+        return NextResponse.json(
+          {
+            error:
+              "The WAN-REPLACE lane (wan-replace) requires a subject mask — pass maskUrl (http-fetchable mask VIDEO, frame-for-frame with videoUrl; WHITE = subject). The MATTE lane's own output on the same source clip is the intended source. maskPath / mask also accepted. Unlike vace-inpaint, a still image is NOT auto-repeated here — a proper mask video is required.",
+          },
+          { status: 400 },
+        );
+      }
       if (maskName) {
         maskIsImage = VACE_IMAGE_MASK_RE.test(maskName);
+        if (wantsWanReplace && maskIsImage) {
+          return NextResponse.json(
+            {
+              error:
+                "The WAN-REPLACE lane's mask must be a VIDEO (frame-for-frame with videoUrl), not a still image — pass the MATTE lane's video output for this same source clip.",
+            },
+            { status: 400 },
+          );
+        }
         if (wantsMatte && !maskIsImage) {
           return NextResponse.json(
             {
@@ -1371,6 +1397,79 @@ export async function POST(request: NextRequest) {
         frames,
         duration: 0,
         resolution: `${wanAnimateDimForHistory(body.width, 832)}x${wanAnimateDimForHistory(body.height, 480)}`,
+        model: modelProfile.id,
+        modelName: modelProfile.name,
+        worker: worker.name,
+        createdAt: new Date().toISOString(),
+        sourceVideoUrl:
+          typeof body.videoUrl === "string" && body.videoUrl ? body.videoUrl : videoName,
+        progress: 0,
+        stage: "main",
+      };
+      await addToHistory(item);
+      return NextResponse.json({
+        id,
+        comfyPromptId: comfyResponse.prompt_id,
+        clientId,
+        status: "processing",
+      });
+    }
+
+    if (modelProfile.kind === "wan-replace") {
+      // All three inputs are mandatory; the prerequisites above already 400
+      // a missing video/mask, this covers the image (resolved generically
+      // elsewhere) and is belt-and-braces for the other two.
+      if (!videoName || !imageName || !maskName) {
+        return NextResponse.json(
+          {
+            error:
+              "The WAN-REPLACE lane needs videoUrl (driving performance + plate), imageUrl (the new character), AND maskUrl (subject mask matching videoUrl frame-for-frame)",
+          },
+          { status: 400 },
+        );
+      }
+
+      const template = loadTemplate(
+        modelProfile.templateFile ?? "wan_replace.json",
+      );
+      const frames = wanAnimateLength(
+        typeof body.frames === "number" ? body.frames : undefined,
+      );
+      const workflow = buildWanReplace({
+        template,
+        videoName,
+        referenceName: imageName,
+        maskName,
+        positive: prompt,
+        negative: typeof body.negativePrompt === "string" ? body.negativePrompt : undefined,
+        width: typeof body.width === "number" ? body.width : undefined,
+        height: typeof body.height === "number" ? body.height : undefined,
+        frames,
+        seed: typeof body.seed === "number" ? body.seed : undefined,
+        filenamePrefix: `FrameForge/wan_replace_${id}`,
+      });
+
+      const clientId = uuidv4();
+      const comfyResponse = await queuePrompt(
+        comfyBase,
+        workflow as unknown as Record<string, unknown>,
+        clientId,
+      );
+
+      // fps and duration are INHERITED from the driving video inside the
+      // graph (same contract as WAN-ANIMATE) — recording 0 says "not
+      // asserted here" rather than inventing a rate.
+      const item: VideoGenerationItem = {
+        id,
+        status: "processing",
+        prompt,
+        comfyPromptId: comfyResponse.prompt_id,
+        width: wanAnimateDimForHistory(body.width, 848),
+        height: wanAnimateDimForHistory(body.height, 480),
+        fps: 0,
+        frames,
+        duration: 0,
+        resolution: `${wanAnimateDimForHistory(body.width, 848)}x${wanAnimateDimForHistory(body.height, 480)}`,
         model: modelProfile.id,
         modelName: modelProfile.name,
         worker: worker.name,

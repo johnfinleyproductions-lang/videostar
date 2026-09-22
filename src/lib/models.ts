@@ -37,6 +37,7 @@ export type VideoModelId =
   // character still → the character performing that motion. Explicit
   // selection only, never a default.
   | "wan-animate2"
+  | "wan-replace"
   // HunyuanVideo-Foley FOLEY lane (an existing — usually silent — clip +
   // optional text hint → the same clip as an mp4 with synchronized 48kHz
   // SFX/ambience muxed on; transform-of-footage lane — explicit selection
@@ -491,6 +492,48 @@ export const VIDEO_MODEL_PROFILES: VideoModelProfile[] = [
     videoCfg: 1.0,
     audioCfg: 0,
     // The driver's own track rides through CreateVideo.
+    includeAudio: true,
+    requiresImage: true,
+    requiresVideo: true,
+    supportsEndImage: false,
+  },
+  {
+    // WAN-REPLACE — Wan2.2-Animate V1 Mix/Replace mode. A driving/background
+    // video + one character still + a subject mask: the character is
+    // composited into the masked region ONLY.
+    //
+    // What makes this different from WAN-ANIMATE: this graph's node
+    // (WanAnimateToVideo, not WanAnimate2ToVideo) takes background_video +
+    // character_mask, so the real plate — everything outside the mask,
+    // including its own audio — survives untouched. Proven 2026-09-21 on a
+    // café driving clip: the real background (window, bookshelf, coffee bar)
+    // came through the composite unchanged.
+    //
+    // No baked distilled checkpoint exists for this model (the repo only
+    // ships bf16 + int8_convrot — compare WAN-ANIMATE's separate
+    // wan_animate_2_distill_* files). steps/videoCfg below are the
+    // UNOPTIMIZED base recipe; the shared lightx2v_I2V_14B distill LoRA
+    // (already on disk, not yet wired) is the speed lever once quality is
+    // dialed in against a real MATTE mask rather than a placeholder.
+    //
+    // fps and audio are link-wired from the driving video (same contract as
+    // WAN-ANIMATE) — nothing is resampled, and the status route must never
+    // submit a RIFE post job for this kind.
+    id: "wan-replace",
+    name: "Wan2.2-Animate Replace (Background-Preserving Swap)",
+    shortName: "Replace",
+    description:
+      "Background-preserving swap: a driving/background video + one character still + a subject mask → the character composited into the masked region, the real plate (and its audio) untouched outside it. Requires videoUrl, imageUrl, AND maskUrl. Base recipe (no distilled checkpoint yet): 40 steps, cfg 5.0 — unoptimized, tune once proven.",
+    kind: "wan-replace",
+    backend: "comfyui",
+    templateFile: "wan_replace.json",
+    checkpoint: "wan2.2_animate_14B_int8_convrot.safetensors",
+    textEncoder: "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+    steps: 40,
+    videoCfg: 5.0,
+    audioCfg: 0,
+    // The driver's own track rides through CreateVideo — plain passthrough,
+    // since the background (and its audio) is composited, not regenerated.
     includeAudio: true,
     requiresImage: true,
     requiresVideo: true,
@@ -1403,6 +1446,9 @@ export function resolveVideoModelId(
     // its driving video. Without this it reroutes to the default I2V lane and
     // silently renders an ordinary Wan clip instead — caught by smoke test.
     known.kind !== "wan-animate" &&
+    // WAN-REPLACE takes an image (the new character) AND a video AND a mask
+    // BY DESIGN — same reroute hazard as WAN-ANIMATE.
+    known.kind !== "wan-replace" &&
     known.kind !== "ltx-desktop"
   ) {
     // Image present on a ComfyUI request → Wan 2.2 I2V lane per routing rule.

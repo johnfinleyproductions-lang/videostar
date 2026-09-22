@@ -1,0 +1,317 @@
+{
+  "1": {
+    "class_type": "LoadVideo",
+    "inputs": {
+      "file": "example.mp4"
+    },
+    "_meta": {
+      "title": "FF Driving Video",
+      "note": "The source clip: BOTH the performance to copy AND the real plate to preserve. Feeds background_video directly and pose_video via DWPreprocessor below — unlike WanAnimate2ToVideo, this node's whole point is that the frame is NOT regenerated from scratch."
+    }
+  },
+  "2": {
+    "class_type": "GetVideoComponents",
+    "inputs": {
+      "video": [
+        "1",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "FF Video Components",
+      "note": "Splits the driving video into frames / audio / fps. fps (output 2) and audio (output 1) are link-wired straight into FF Create Video, so keep_original_audio is a plain passthrough — no audio model involved, since the background (and its original audio) is preserved, not regenerated."
+    }
+  },
+  "3": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {
+      "title": "FF Character Ref",
+      "note": "The new character's identity: one still. Feeds both reference_image and the CLIP-vision encode."
+    }
+  },
+  "4": {
+    "class_type": "CLIPVisionLoader",
+    "inputs": {
+      "clip_name": "clip_vision_h.safetensors"
+    },
+    "_meta": {
+      "title": "FF CLIP Vision Loader"
+    }
+  },
+  "5": {
+    "class_type": "CLIPVisionEncode",
+    "inputs": {
+      "clip_vision": [
+        "4",
+        0
+      ],
+      "image": [
+        "3",
+        0
+      ],
+      "crop": "none"
+    },
+    "_meta": {
+      "title": "FF CLIP Vision"
+    }
+  },
+  "6": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "wan2.2_animate_14B_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "FF UNet",
+      "note": "Wan2.2-Animate V1 (Mix/Replace mode) int8. NOT the same repo as wan_animate_2_* (that's the V2/no-mask sequel) — this is Comfy-Org/Wan_2.2_ComfyUI_Repackaged's wan2.2_animate_14B_int8_convrot.safetensors. No baked-in distilled variant exists for this model; the shared lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors LoRA is the acceleration path (NOT wired here yet — first pass uses the full base recipe for correctness, optimize to the LoRA once this is proven)."
+    }
+  },
+  "7": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan"
+    },
+    "_meta": {
+      "title": "FF Text Encoder"
+    }
+  },
+  "8": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    },
+    "_meta": {
+      "title": "FF VAE"
+    }
+  },
+  "9": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "7",
+        0
+      ],
+      "text": ""
+    },
+    "_meta": {
+      "title": "FF Positive",
+      "note": "Patched per request. Describes the new character's appearance/wardrobe; motion and background come from the driving video, not from here."
+    }
+  },
+  "10": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "7",
+        0
+      ],
+      "text": "blurry, low quality, distorted face, extra limbs, watermark, text"
+    },
+    "_meta": {
+      "title": "FF Negative"
+    }
+  },
+  "11": {
+    "class_type": "DWPreprocessor",
+    "inputs": {
+      "image": [
+        "2",
+        0
+      ],
+      "detect_hand": "enable",
+      "detect_body": "enable",
+      "detect_face": "enable",
+      "resolution": 832
+    },
+    "_meta": {
+      "title": "FF Pose Estimate",
+      "note": "comfyui_controlnet_aux's DWPose Estimator (class DWPreprocessor). Derives pose_video from the driving video's own frames — this is the piece WanAnimate2ToVideo's simpler graph never needed, since V2 has no Mix mode to drive."
+    }
+  },
+  "12": {
+    "class_type": "LoadVideo",
+    "inputs": {
+      "file": "example_mask.mp4"
+    },
+    "_meta": {
+      "title": "FF Mask Video",
+      "note": "Subject mask matching the driving video, frame-for-frame. First test: supply this from the MATTE lane's own output (BiRefNet+MatAnyone2, already proven) rather than standing up a second DWPose-derived masking path."
+    }
+  },
+  "13": {
+    "class_type": "GetVideoComponents",
+    "inputs": {
+      "video": [
+        "12",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "FF Mask Components"
+    }
+  },
+  "14": {
+    "class_type": "ImageToMask",
+    "inputs": {
+      "image": [
+        "13",
+        0
+      ],
+      "channel": "red"
+    },
+    "_meta": {
+      "title": "FF Mask Convert",
+      "note": "Same conversion vace_inpaint.json uses for its own control mask (white=subject here, matching MATTE's alpha convention)."
+    }
+  },
+  "15": {
+    "class_type": "WanAnimateToVideo",
+    "inputs": {
+      "positive": [
+        "9",
+        0
+      ],
+      "negative": [
+        "10",
+        0
+      ],
+      "vae": [
+        "8",
+        0
+      ],
+      "width": 832,
+      "height": 480,
+      "length": 81,
+      "batch_size": 1,
+      "continue_motion_max_frames": 5,
+      "video_frame_offset": 0,
+      "reference_image": [
+        "3",
+        0
+      ],
+      "background_video": [
+        "2",
+        0
+      ],
+      "character_mask": [
+        "14",
+        0
+      ],
+      "pose_video": [
+        "11",
+        0
+      ],
+      "clip_vision_output": [
+        "5",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "FF Replace",
+      "note": "WanAnimateToVideo (V1) — real Mix/Replace mode: background_video + character_mask means the masked region is composited onto the REAL plate, not regenerated. This is the node WAN-ANIMATE's WanAnimate2ToVideo does not have. face_video left unconnected for this first pass (optional per object_info; add if identity/expression fidelity needs it)."
+    }
+  },
+  "16": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "6",
+        0
+      ],
+      "positive": [
+        "15",
+        0
+      ],
+      "negative": [
+        "15",
+        1
+      ],
+      "latent_image": [
+        "15",
+        2
+      ],
+      "seed": 12345,
+      "steps": 40,
+      "cfg": 5.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    },
+    "_meta": {
+      "title": "FF Sampler",
+      "note": "UNOPTIMIZED FIRST PASS: base (non-distilled) recipe — 40 steps, cfg 5.0 — chosen for correctness over speed since there is no baked distilled checkpoint for V1 (unlike V2's wan_animate_2_distill_*). Tune steps/cfg and/or wire the lightx2v distill LoRA once the graph is proven end-to-end. seed patched per request."
+    }
+  },
+  "17": {
+    "class_type": "TrimVideoLatent",
+    "inputs": {
+      "samples": [
+        "16",
+        0
+      ],
+      "trim_amount": [
+        "15",
+        3
+      ]
+    },
+    "_meta": {
+      "title": "FF Trim"
+    }
+  },
+  "18": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "17",
+        0
+      ],
+      "vae": [
+        "8",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "FF Decode"
+    }
+  },
+  "19": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "images": [
+        "18",
+        0
+      ],
+      "fps": [
+        "2",
+        2
+      ],
+      "audio": [
+        "2",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "FF Create Video",
+      "note": "fps and audio come from the DRIVING video's own components — keep_original_audio is this passthrough; force_new_voice (not built yet) would replace input 'audio' with a voice-clone/TTS pass instead."
+    }
+  },
+  "20": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "video": [
+        "19",
+        0
+      ],
+      "filename_prefix": "FrameForge/wan_replace",
+      "format": "auto",
+      "codec": "auto"
+    },
+    "_meta": {
+      "title": "FF Output"
+    }
+  }
+}

@@ -57,6 +57,7 @@ export type LaneKey =
   | "LIP-SYNC"
   | "LTX25-I2V"
   | "WAN-ANIMATE"
+  | "WAN-REPLACE"
   | "MG-TYPE"
   | "MG-ALPHA"
   | "MATTE"
@@ -432,6 +433,38 @@ export const LANES: readonly LaneDescriptor[] = [
         default: 1,
         description:
           "How strongly frames attend to the character still (0..1, default 1.0). Lower drifts off the likeness.",
+      },
+    ],
+  },
+  {
+    laneKey: "WAN-REPLACE",
+    title: "Wan2.2-Animate Replace (Background-Preserving Swap)",
+    description:
+      "BACKGROUND-PRESERVING SWAP: a driving/background video + one character still + a subject mask → the character composited into the masked region, everything OUTSIDE the mask — the real plate, its camera motion, ITS ORIGINAL AUDIO — untouched (unlike WAN-ANIMATE, which regenerates the whole frame). This is the WanAnimateToVideo (V1) node, the sibling WAN-ANIMATE's WanAnimate2ToVideo does NOT have. Requires videoUrl (driving performance + plate), imageUrl (the new character), AND maskUrl (subject mask matching the driving video frame-for-frame — the MATTE lane's own output is the intended source; DWPose-derived masking is a documented alternative, not required). No baked distilled checkpoint exists for this model (unlike WAN-ANIMATE's wan_animate_2_distill_*) — first-pass recipe is the base 40-step/cfg-5 path, unoptimized; the shared lightx2v distill LoRA is the tuning target once quality is proven. keep_original_audio is a plain mux (no model pass, since the background truly is preserved); force_new_voice is not built yet. PROVEN 2026-09-21: graph runs end-to-end on vidbox-gm (:8193) with zero node errors, real background composited (café plate preserved through the swap), DWPose tracked the subject on all 81 frames — UNVERIFIED: mask/step-count tuning (the first test used a crude placeholder rectangle mask and 10 steps for speed, not a real MATTE mask or the full base recipe). Explicit selection only, never a default.",
+    kind: "wan-replace",
+    executor: "generate",
+    endpoint: "/api/generate",
+    modelId: "wan-replace",
+    requiresImage: true,
+    acceptsImage: true,
+    textOnly: false,
+    supportsAudio: profile("wan-replace").includeAudio === true,
+    outputFormat: "mp4",
+    typicalRenderMinutes: 8,
+    extraParams: [
+      {
+        name: "videoUrl",
+        type: "string",
+        required: true,
+        description:
+          "REQUIRED: the driving performance AND the background plate to preserve — an http-fetchable mp4/webm. `video` (a ComfyUI input-dir ref) and videoPath accepted alternatives. Output fps and audio are inherited from THIS clip.",
+      },
+      {
+        name: "maskUrl",
+        type: "string",
+        required: true,
+        description:
+          "REQUIRED: the subject mask, frame-for-frame with videoUrl (white = subject/replace, matching MATTE's alpha convention) — an http-fetchable mask VIDEO (a still is NOT auto-repeated here, unlike VACE's vace-inpaint; pass a proper mask video, e.g. the MATTE lane's own output run on the same source clip). maskPath / mask accepted alternatives.",
       },
     ],
   },

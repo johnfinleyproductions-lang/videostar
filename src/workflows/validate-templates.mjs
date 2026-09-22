@@ -282,6 +282,24 @@ const TEMPLATES = {
     // different lane wearing this one's name.
     forbidden: ["FF Background Video", "FF Character Mask", "FF Face Video"],
   },
+  // WAN-REPLACE background-preserving swap lane (wan_replace.json) — patched
+  // by buildWanReplace (see WAN_REPLACE_TEMPLATE_TITLES). This is the
+  // OPPOSITE lane from wan_animate2.json: it exists ONLY because
+  // WanAnimateToVideo (V1, no "2") takes background_video + character_mask,
+  // so require both here — a template missing them would silently degrade
+  // into a WAN-ANIMATE-shaped full regeneration wearing this lane's name.
+  // Proven end-to-end on vidbox-gm :8193 2026-09-21 (wan2.2_animate_14B_int8_convrot
+  // in the loader enum, WanAnimateToVideo in /object_info, comfyui_controlnet_aux's
+  // DWPreprocessor tracked the subject on all 81 frames, real café background
+  // composited through in the output render).
+  "wan_replace.json": {
+    required: [
+      "FF Driving Video", "FF Video Components", "FF Character Ref",
+      "FF Mask Video", "FF Mask Components", "FF Mask Convert",
+      "FF Pose Estimate", "FF Positive", "FF Negative", "FF Replace",
+      "FF Sampler", "FF Create Video", "FF Output",
+    ],
+  },
   "ltx25_i2v.json": {
     required: [
       "FF Positive", "FF Negative", "FF Start Image", "FF Seed",

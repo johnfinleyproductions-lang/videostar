@@ -101,6 +101,14 @@ export type VideoProfileKind =
   // is the only lane taking a video AND an image, and because the status
   // route must never RIFE it (the output inherits the driver's fps).
   | "wan-animate"
+  // Wan2.2-Animate V1 Mix/Replace mode — a driving/background video +
+  // character still + subject mask -> the character composited into the
+  // masked region, everything OUTSIDE the mask (the real plate, incl. its
+  // audio) untouched. Distinct kind (and distinct node, WanAnimateToVideo,
+  // NOT WanAnimate2ToVideo) because this is the only lane taking a video AND
+  // an image AND a mask, and because it is the one lane that genuinely
+  // preserves the source background rather than regenerating it.
+  | "wan-replace"
   | "hv-template"
   | "minimax-h3"
   // MiniMax-H3 Reference-to-Video on the comfy-master gm instance (:8193)
