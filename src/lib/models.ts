@@ -866,15 +866,27 @@ export const VIDEO_MODEL_PROFILES: VideoModelProfile[] = [
     // GuideMaster keyframe pins (guideImageNUrl + guideFrameN) land cuts on
     // exact frames (style-dependent: hard-cut styles are frame-exact).
     // Runs ONLY on the vidbox-gm worker (comfy master, :8193).
+    //
+    // Checkpoint swapped 2026-09-21 (baked directly into h3_r2v.json's
+    // UNETLoader node, NOT patched per-request — the `checkpoint` field below
+    // is display-only) from minimax_h3_ref2va_pruned_int8_convrot.safetensors
+    // to WarmBloodAban/Minimax-h3_Singularity's pruned int8, after a
+    // same-seed/same-prompt A/B on the da Vinci workshop reference case:
+    // visibly sharper detail + lighting depth, equal-or-better face/skin
+    // texture, no plasticky artifacts in either. Old checkpoint kept on
+    // /srv/comfyui/models/diffusion_models/ for rollback (just edit the
+    // template's node "1" unet_name back). Community fine-tune (Apache-2.0,
+    // base_model MiniMaxAI/MiniMax-H3), not an official MiniMax/Comfy-Org
+    // release — re-evaluate if MiniMax ships an official quality update.
     id: "h3-r2v",
     name: "MiniMax H3 Reference-to-Video",
     shortName: "H3 R2V",
     description:
-      "Multi-entity reference conditioning WITH native audio: up to 4 refs (character/prop/environment/storyboard grid) bound by <Picture i> tags, identity held across multi-shot rolls. Optional GuideMaster keyframe pins for exact cuts. 1344x768 @ 24fps on the 17k+5 grid. Explicit selection; needs the gm instance (:8193).",
+      "Multi-entity reference conditioning WITH native audio: up to 4 refs (character/prop/environment/storyboard grid) bound by <Picture i> tags, identity held across multi-shot rolls. Optional GuideMaster keyframe pins for exact cuts. 1344x768 @ 24fps on the 17k+5 grid. Runs on the Minimax-h3_Singularity fine-tune (sharper/HDR, swapped 2026-09-21 — see checkpoint note). Explicit selection; needs the gm instance (:8193).",
     kind: "minimax-h3-r2v",
     backend: "comfyui",
     templateFile: "h3_r2v.json",
-    checkpoint: "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+    checkpoint: "Minimax-h3_Singularity_ref2va_Pruned_v1.3_int8.safetensors",
     textEncoder: "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
     steps: 8,
     videoCfg: 1,
@@ -897,11 +909,11 @@ export const VIDEO_MODEL_PROFILES: VideoModelProfile[] = [
     name: "H3 R2V Seed-Hunt Draft",
     shortName: "H3 R2V Draft",
     description:
-      "0.5MP seed-hunt preview (960x544): generate 3 seeds cheap, pick one, promote the seed to h3-r2v-1080p for the finalize. Same refs/prompt contract as h3-r2v.",
+      "0.5MP seed-hunt preview (960x544): generate 3 seeds cheap, pick one, promote the seed to h3-r2v-1080p for the finalize. Same refs/prompt contract as h3-r2v. Shares h3_r2v.json, so it rides the same Minimax-h3_Singularity checkpoint swap.",
     kind: "minimax-h3-r2v",
     backend: "comfyui",
     templateFile: "h3_r2v.json",
-    checkpoint: "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+    checkpoint: "Minimax-h3_Singularity_ref2va_Pruned_v1.3_int8.safetensors",
     textEncoder: "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
     steps: 8,
     videoCfg: 1,
@@ -928,7 +940,7 @@ export const VIDEO_MODEL_PROFILES: VideoModelProfile[] = [
     kind: "minimax-h3-r2v",
     backend: "comfyui",
     templateFile: "h3_r2v.json",
-    checkpoint: "minimax_h3_ref2va_pruned_int8_convrot + latent_upscaler_3d_fp16",
+    checkpoint: "Minimax-h3_Singularity_ref2va_Pruned_v1.3_int8 + latent_upscaler_3d_fp16",
     textEncoder: "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
     steps: 8,
     videoCfg: 1,

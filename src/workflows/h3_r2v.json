@@ -2,11 +2,12 @@
  "1": {
   "class_type": "UNETLoader",
   "inputs": {
-   "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+   "unet_name": "Minimax-h3_Singularity_ref2va_Pruned_v1.3_int8.safetensors",
    "weight_dtype": "default"
   },
   "_meta": {
-   "title": "FF Unet"
+   "title": "FF Unet",
+   "note": "Swapped 2026-09-21 from minimax_h3_ref2va_pruned_int8_convrot.safetensors (kept on /srv for rollback) after a same-seed/same-prompt A/B on the da Vinci workshop reference case: Singularity showed visibly sharper detail, better lighting depth, and equal-or-better face/skin texture with no plasticky artifacts in either. Community fine-tune (WarmBloodAban/Minimax-h3_Singularity, Apache-2.0, base_model MiniMaxAI/MiniMax-H3), not an official MiniMax/Comfy-Org release."
   }
  },
  "2": {
