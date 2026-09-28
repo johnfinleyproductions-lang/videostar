@@ -321,11 +321,18 @@ function errText(json) {
 }
 
 /**
- * Serve a directory over loopback so the lane can be driven through its
- * DOCUMENTED videoUrl/audioUrl interface instead of the local-path shortcut.
- * Binds 0.0.0.0 because the fetch is made by the Next process, and returns a
- * LAN-addressable base built from the configured BASE host — 127.0.0.1 would
- * only work while the app and this script share a machine.
+ * Serve a directory so the lane can be driven through its DOCUMENTED
+ * videoUrl/audioUrl interface instead of the local-path shortcut.
+ *
+ * BINDS LOOPBACK ONLY, and this is not a detail — an earlier version bound
+ * 0.0.0.0 and Windows responded by auto-creating two "Query User" BLOCK rules
+ * for node.exe (TCP + UDP, Public profile) because a listening socket appeared
+ * with no interactive user to approve the prompt. Those rules are PROGRAM-wide
+ * and block rules beat allow rules, so they silently took VideoStar's own port
+ * 3060 off the LAN while leaving it fine on localhost — a firewall change
+ * caused by a test run. The app and this script always share a host (the lane
+ * spawns WSL locally), so loopback is both sufficient and side-effect-free.
+ * Never widen this bind.
  */
 function serveDir(rootDir) {
   const server = createServer((req, res) => {
@@ -349,9 +356,9 @@ function serveDir(rootDir) {
   });
   // listen() is async — resolve only once the port is actually assigned.
   return new Promise((resolve) => {
-    server.listen(0, "0.0.0.0", () => {
+    server.listen(0, "127.0.0.1", () => {
       const { port } = server.address();
-      resolve({ server, base: `http://${new URL(BASE).hostname}:${port}` });
+      resolve({ server, base: `http://127.0.0.1:${port}` });
     });
   });
 }
