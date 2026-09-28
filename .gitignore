@@ -45,3 +45,10 @@ next-env.d.ts
 # IDE
 .vscode/
 .idea/
+
+# REVOICE lane runtime artifacts. Job inputs keep a FULL COPY of each source
+# clip and outputs are whole mp4s, so these grow fast (505MB after a handful of
+# smoke runs) and must never be committed. NOTE the Lens lane predates this and
+# HAS its job sidecars + output PNGs tracked in git — do not copy that pattern.
+/data/revoice-jobs/
+/public/outputs/revoice/

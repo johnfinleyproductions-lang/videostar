@@ -82,6 +82,24 @@ export type VideoGenerationStatus =
  *                   and the .mov/.webm deliverables live on think, not in the
  *                   ComfyUI output dir. Never a default; explicit selection
  *                   only.
+ * - "revoice":      Chatterbox VC re-voice (REVOICE lane): a clip + a
+ *                   target-voice reference → the SAME clip with a different
+ *                   speaker's timbre. Voice CONVERSION, not TTS: the source
+ *                   speech tokens survive, so timing/phrasing/cadence are
+ *                   unchanged, the footage's existing mouth movements stay
+ *                   valid, and the picture is remuxed with `-c:v copy` — the
+ *                   video bitstream of the output is BYTE-IDENTICAL to the
+ *                   input (revoice.py MD5-compares the video stream and fails
+ *                   the job rather than shipping a re-encode). Runs a detached
+ *                   python in WSL (src/lib/revoice-client.ts), NOT ComfyUI:
+ *                   any graph would have to end in VHS_VideoCombine, whose
+ *                   re-encode destroys exactly the stream copy this lane
+ *                   exists to provide. MUST never join the RIFE post gate
+ *                   (interpolating would re-encode the picture and desync the
+ *                   audio it was just matched to) and is exempt from the image
+ *                   reroute (a stray image is ignored — rerouting would swap a
+ *                   dub of real footage for a generated clip). Never a
+ *                   default; explicit selection only.
  */
 export type VideoProfileKind =
   | "wan-i2v"
@@ -118,7 +136,12 @@ export type VideoProfileKind =
   | "ltx-sidecar"
   | "svi-chain"
   | "ltx-desktop"
-  | "remotion";
+  | "remotion"
+  // Chatterbox VC re-voice lane — the only lane whose output SHARES its video
+  // bitstream with its input (`-c:v copy`). Distinct kind because it runs a
+  // detached python in WSL rather than a ComfyUI graph, and because the status
+  // route must poll its job sidecar instead of ComfyUI history.
+  | "revoice";
 
 /**
  * Frame-grid family: Wan needs 4n+1 frame counts, LTX needs 8n+1, and
@@ -479,10 +502,18 @@ export interface VideoGenerationItem {
    * "remotion" = an MG-TYPE job running on the think render service; the
    * status route polls think (via remoteJobId) instead of ComfyUI history,
    * and the RIFE gate never sees it.
+   * "revoice" = a REVOICE job running as a detached python in WSL on this box;
+   * the status route reads its job sidecar (via remoteJobId) instead of ComfyUI
+   * history, and the RIFE gate never sees it (interpolation would re-encode the
+   * stream-copied picture and desync the freshly matched audio).
    */
-  kind?: "finish" | "remotion";
+  kind?: "finish" | "remotion" | "revoice";
   // --- Remotion jobs (MG-TYPE lane on the think render service) ---
-  /** think render-service job id (GET :3070/jobs/<remoteJobId>). */
+  /**
+   * Out-of-ComfyUI job handle. kind "remotion" → think render-service job id
+   * (GET :3070/jobs/<remoteJobId>); kind "revoice" → the local WSL job id whose
+   * status sidecar lives in data/revoice-jobs/<remoteJobId>.json.
+   */
   remoteJobId?: string;
   /**
    * Browser-playable VP8 alpha webm preview (LowerThird only — the primary

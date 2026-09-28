@@ -4,7 +4,13 @@
 // status route only appends &worker= for NON-default workers).
 // GET /api/output?remotion=<remoteJobId>[&variant=preview] — Proxy MG-TYPE
 // files straight from the think render service (:3070/files/<jobId>).
+// GET /api/output?revoice=<jobId>[&variant=audio] — Stream a finished REVOICE
+// deliverable off local disk (Range-capable; &variant=audio = the keepAudio
+// .wav companion).
 
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { Readable } from "node:stream";
 import { NextRequest, NextResponse } from "next/server";
 import { getOutputFile } from "@/lib/comfyui-client";
 import { getWorkerComfyBase } from "@/lib/fleet";
@@ -13,6 +19,7 @@ import {
   fetchRemotionFile,
   RemotionServiceUnreachableError,
 } from "@/lib/remotion-client";
+import { isRevoiceJobId, revoiceOutputPath } from "@/lib/revoice-client";
 
 export const dynamic = "force-dynamic";
 
@@ -73,6 +80,95 @@ export async function GET(request: NextRequest) {
       return new NextResponse(upstream.body, {
         status: upstream.status,
         headers,
+      });
+    }
+
+    // ------------------------------------------------------------------
+    // REVOICE passthrough (streams the finished file off local disk)
+    // ------------------------------------------------------------------
+    // MUST be an API route, not a static /outputs/... path: `next start` scans
+    // public/ only at BOOT, so a file a job writes while the server is running
+    // 404s until the next restart (measured live 2026-09-26). Streaming here
+    // also gives real Range support so a browser can seek the mp4.
+    // &variant=audio serves the keepAudio .wav companion.
+    const revoiceJobId = searchParams.get("revoice");
+    if (revoiceJobId) {
+      if (!isRevoiceJobId(revoiceJobId)) {
+        return NextResponse.json(
+          { error: "Invalid REVOICE job id" },
+          { status: 400 },
+        );
+      }
+      const variant =
+        searchParams.get("variant") === "audio" ? "audio" : "primary";
+      const filePath = revoiceOutputPath(revoiceJobId, variant);
+
+      let size: number;
+      try {
+        size = (await stat(filePath)).size;
+      } catch {
+        return NextResponse.json(
+          {
+            error:
+              variant === "audio"
+                ? "No standalone audio for this job (pass keepAudio on the request to emit one)"
+                : "REVOICE output not found",
+          },
+          { status: 404 },
+        );
+      }
+
+      const contentType = variant === "audio" ? "audio/wav" : "video/mp4";
+      const filename = `${revoiceJobId}${variant === "audio" ? ".wav" : ".mp4"}`;
+      const rangeHeader = request.headers.get("range");
+      const match = rangeHeader?.match(/^bytes=(\d*)-(\d*)$/);
+
+      // Honour a byte range so <video> seeking works; anything unparseable or
+      // out of bounds degrades to the full body rather than erroring.
+      if (match && (match[1] || match[2])) {
+        let start = match[1] ? Number(match[1]) : 0;
+        let end = match[2] ? Number(match[2]) : size - 1;
+        if (!match[1] && match[2]) {
+          // suffix form "bytes=-500" = the LAST 500 bytes
+          start = Math.max(0, size - Number(match[2]));
+          end = size - 1;
+        }
+        if (
+          Number.isFinite(start) &&
+          Number.isFinite(end) &&
+          start <= end &&
+          start < size
+        ) {
+          end = Math.min(end, size - 1);
+          const stream = Readable.toWeb(
+            createReadStream(filePath, { start, end }),
+          ) as ReadableStream;
+          return new NextResponse(stream, {
+            status: 206,
+            headers: {
+              "Content-Type": contentType,
+              "Content-Length": String(end - start + 1),
+              "Content-Range": `bytes ${start}-${end}/${size}`,
+              "Accept-Ranges": "bytes",
+              "Content-Disposition": `inline; filename="${filename}"`,
+              "Cache-Control": "public, max-age=31536000, immutable",
+            },
+          });
+        }
+      }
+
+      const stream = Readable.toWeb(
+        createReadStream(filePath),
+      ) as ReadableStream;
+      return new NextResponse(stream, {
+        headers: {
+          "Content-Type": contentType,
+          "Content-Length": String(size),
+          "Accept-Ranges": "bytes",
+          "Content-Disposition": `inline; filename="${filename}"`,
+          // Immutable per job id — same policy as the ComfyUI files.
+          "Cache-Control": "public, max-age=31536000, immutable",
+        },
       });
     }
 

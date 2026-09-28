@@ -40,6 +40,10 @@ import {
 import type { VideoProfileKind } from "./types";
 import { REMOTION_COMPOSITION_IDS } from "./remotion-client";
 import {
+  REVOICE_MAX_SECONDS,
+  REVOICE_MIN_VOICE_SECONDS,
+} from "./revoice-client";
+import {
   CAMERA_LIB_MOVES,
   DEFAULT_CAMERA_POSE,
   FOLEY_MAX_SECONDS,
@@ -62,6 +66,7 @@ export type LaneKey =
   | "MG-ALPHA"
   | "MATTE"
   | "FOLEY"
+  | "REVOICE"
   | "MUSIC"
   | "HV-HUMANS"
   | "MINIMAX-H3"
@@ -549,6 +554,55 @@ export const LANES: readonly LaneDescriptor[] = [
         default: FOLEY_MAX_SECONDS,
         description:
           `Optional trim (seconds from the start; frame_load_cap patched — the generated audio length follows the loaded frames automatically). Values above ${FOLEY_MAX_SECONDS} → 400 (FOLEY_MAX_SECONDS) — cut longer footage before scoring it.`,
+      },
+    ],
+  },
+  {
+    laneKey: "REVOICE",
+    title: "Chatterbox Re-Voice (Footage → Same Footage, New Voice)",
+    description:
+      "Change WHO is speaking without re-rendering a frame: a clip + a 5-15s reference of the target voice → the SAME clip with that voice. Chatterbox VC is voice CONVERSION, not TTS — the source speech tokens are kept and only the speaker identity is swapped, so the original timing, phrasing and cadence survive and the lip movements already in the footage stay correct. Nothing is re-synced and nothing is regenerated: the video bitstream is remuxed with `-c:v copy`, so the output's picture is BYTE-IDENTICAL to the source (MD5-verified per job — a mismatch fails the job rather than shipping a re-encode). NOT the LIP-SYNC lane: there `audioUrl` is the words to SAY and the picture is regenerated; here `audioUrl` is only whose voice to WEAR and the picture is untouched. Runs on CPU in WSL, so it can dub while a GPU lane renders. MIT end to end (chatterbox-tts + ResembleAI weights) — safe for monetized work, unlike XTTS/CPML. Chatterbox stamps a Perth audio watermark into the track by design.",
+    kind: "revoice",
+    executor: "generate",
+    endpoint: "/api/generate",
+    modelId: "revoice",
+    requiresImage: false,
+    acceptsImage: false,
+    // Not "text-only" in any sense — but there is no prompt either: the two
+    // media inputs ARE the entire request.
+    textOnly: false,
+    supportsAudio: true,
+    outputFormat: "mp4",
+    // ~1GB model on CPU: load dominates a short clip, then roughly real-time
+    // per chunk. No GPU, so this number does not move with fleet contention.
+    typicalRenderMinutes: 3,
+    extraParams: [
+      {
+        name: "videoUrl",
+        type: "string",
+        required: true,
+        description:
+          `REQUIRED: the clip to re-voice — an http-fetchable mp4/webm, or videoPath (a local file on the FrameForge host). Its video stream is copied byte-for-byte into the output; its existing audio is what gets converted, so the clip MUST already carry the speech. A clip with NO audio track is rejected by the converter within seconds (before the model loads) and surfaces as a FAILED JOB, not a 400 — this route cannot see audio tracks, because the shared header prober reads the video track only. Unlike every ComfyUI lane there is no \`video\` ref form — the bytes never pass through ComfyUI. Max ${REVOICE_MAX_SECONDS}s per job (longer → 400: cut it first); clips over 40s are split on silence internally, never mid-word.`,
+      },
+      {
+        name: "audioUrl",
+        type: "string",
+        required: true,
+        description:
+          `REQUIRED: a clean reference of the TARGET VOICE — whose timbre to wear, NOT what to say (that is the LIP-SYNC lane). 5-15s of one speaker, no music or overlap; ${REVOICE_MIN_VOICE_SECONDS}s minimum. A too-short WAV or MP3 is refused immediately with a 400; in any OTHER container (an .m4a voice memo, say) the length is enforced by the converter instead and comes back as a failed job — the pre-dispatch prober reads WAV and MP3 only. audioBase64 / audioPath also accepted. Any VoxStation voice works as a reference, but note the source of a CLONED reference voice carries its own licensing — the MIT guarantee here covers the conversion model, not whatever voice you point it at.`,
+      },
+      {
+        name: "audioBitrate",
+        type: "string",
+        default: "192k",
+        description:
+          "AAC bitrate for the muxed track. The VIDEO is never re-encoded at any setting — this only affects the new audio stream.",
+      },
+      {
+        name: "keepAudio",
+        type: "string",
+        description:
+          "Set \"true\" to also emit the converted audio on its own, for layering under the original dialogue in an edit instead of replacing it. Fetch it by adding &variant=audio to the finished job's url (a .wav alongside the mp4).",
       },
     ],
   },

@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "validate:templates": "node src/workflows/validate-templates.mjs",
-    "validate:lanes": "node scripts/validate-lanes.mjs"
+    "validate:lanes": "node scripts/validate-lanes.mjs",
+    "smoke:revoice": "node scripts/revoice-smoke.mjs"
   },
   "dependencies": {
     "framer-motion": "^12.38.0",

@@ -100,6 +100,12 @@ import {
   buildLtxDesktopOutputUrl,
   generateLtxDesktopVideo,
 } from "@/lib/ltx-desktop-client";
+import {
+  queueRevoiceJob,
+  REVOICE_MAX_SECONDS,
+  REVOICE_MIN_VOICE_SECONDS,
+  RevoiceRuntimeUnavailableError,
+} from "@/lib/revoice-client";
 import type { GenerateRequest, VideoGenerationItem } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -300,6 +306,55 @@ async function resolveVideoRef(
   return { ref: uploaded.videoRef, bytes: buffer };
 }
 
+/**
+ * Resolve a video source to raw BYTES, without touching ComfyUI.
+ *
+ * resolveVideoRef above always uploads into a ComfyUI input folder, which the
+ * REVOICE lane must not do: its converter is a python process in WSL reading a
+ * local file, and routing the bytes through a ComfyUI box would make the lane
+ * fail whenever that box is down for a job that never needed it. Mirrors
+ * resolveAudioBuffer's url/path handling; `ref` is deliberately unsupported (a
+ * ComfyUI input-dir ref is not a path this lane can read).
+ */
+async function resolveVideoBuffer(
+  source: { url?: unknown; path?: unknown },
+  fallbackName: string,
+): Promise<{ buffer: Buffer; filename: string } | null> {
+  const KNOWN_EXT = /\.(mp4|webm|mov|mkv)$/i;
+
+  if (typeof source.url === "string" && source.url.trim()) {
+    const url = source.url.trim();
+    const res = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+    if (!res.ok) {
+      throw new Error(`Failed to fetch input video (${res.status}): ${url}`);
+    }
+    const buffer = Buffer.from(await res.arrayBuffer());
+    let filename = fallbackName;
+    try {
+      const base = path.basename(new URL(url).pathname);
+      if (base && KNOWN_EXT.test(base)) filename = base;
+    } catch {
+      // keep fallback name
+    }
+    if (!KNOWN_EXT.test(filename)) {
+      const contentType = res.headers.get("content-type") || "";
+      filename += contentType.includes("webm") ? ".webm" : ".mp4";
+    }
+    return { buffer, filename };
+  }
+
+  if (typeof source.path === "string" && source.path.trim()) {
+    const filePath = source.path.trim();
+    const buffer = await readFile(filePath);
+    return {
+      buffer,
+      filename: path.basename(filePath) || `${fallbackName}.mp4`,
+    };
+  }
+
+  return null;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -315,9 +370,13 @@ export async function POST(request: NextRequest) {
     //   - The MG-TYPE lane (mg-type / laneKey "MG-TYPE") — a deterministic
     //     Remotion render: the composition props (title, subtitle, …) ARE
     //     the content, there is no text conditioning to prompt.
+    //   - The REVOICE lane (revoice / laneKey "REVOICE") — a voice CONVERSION
+    //     of existing footage: the clip and the target-voice reference ARE the
+    //     request. There is no text anywhere in the pipeline (not even a
+    //     tokeniser — VC never reads words), so a prompt would be meaningless.
     // All follow the same rule: an explicit model always wins over laneKey,
     // mirroring the routing below, so a non-exempt model with laneKey
-    // "MATTE"/"FOLEY"/"MG-TYPE" still requires a prompt.
+    // "MATTE"/"FOLEY"/"MG-TYPE"/"REVOICE" still requires a prompt.
     const rawModel: string | undefined =
       typeof body.model === "string" && body.model
         ? body.model
@@ -332,10 +391,12 @@ export async function POST(request: NextRequest) {
       rawModel === "matanyone-matte" ||
       rawModel === "foley-sfx" ||
       rawModel === "mg-type" ||
+      rawModel === "revoice" ||
       (!rawModel &&
         (rawLaneKey === "MATTE" ||
           rawLaneKey === "FOLEY" ||
-          rawLaneKey === "MG-TYPE"));
+          rawLaneKey === "MG-TYPE" ||
+          rawLaneKey === "REVOICE"));
     if (!prompt.trim() && !promptOptional) {
       return NextResponse.json({ error: "Prompt is required" }, { status: 400 });
     }
@@ -363,6 +424,24 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Same shape for REVOICE, and for the same reason: kind "revoice" ignores
+    // images (exempt from the image reroute) and its bytes never touch ComfyUI,
+    // so uploading a stray imageUrl to the ComfyUI box first would 500 an
+    // otherwise-valid dispatch whenever that box is down — even though the
+    // conversion is a CPU job in WSL that needs no ComfyUI at all.
+    const wantsRevoice =
+      rawModel === "revoice" || (!rawModel && rawLaneKey === "REVOICE");
+    if (
+      wantsRevoice &&
+      (body.imageUrl || body.imageBase64 || body.imagePath ||
+        body.endImageUrl || body.endImageBase64 || body.endImagePath)
+    ) {
+      console.log(
+        "[FrameForge] imageUrl ignored — the REVOICE lane re-voices existing footage (video + target-voice reference only)",
+      );
+    }
+    const skipComfyInputs = wantsRemotion || wantsRevoice;
+
     // ------------------------------------------------------------------
     // Resolve input images (start frame + optional end frame)
     // ------------------------------------------------------------------
@@ -374,7 +453,7 @@ export async function POST(request: NextRequest) {
     let imageName: string | undefined;
     let endImageName: string | undefined;
 
-    const startSource = wantsRemotion
+    const startSource = skipComfyInputs
       ? null
       : await resolveImageBuffer(
           { url: body.imageUrl, base64: body.imageBase64, path: body.imagePath },
@@ -402,7 +481,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const endSource = wantsRemotion
+    const endSource = skipComfyInputs
       ? null
       : await resolveImageBuffer(
           {
@@ -591,6 +670,194 @@ export async function POST(request: NextRequest) {
         id,
         // No ComfyUI prompt / websocket for the remotion lane; keep the
         // public response shape uniform (the LTX Desktop sidecar precedent).
+        comfyPromptId: "",
+        clientId: "",
+        status: "processing",
+      });
+    }
+
+    // ------------------------------------------------------------------
+    // REVOICE lane (Chatterbox voice conversion — detached python in WSL)
+    // ------------------------------------------------------------------
+    // Explicit selection only (model "revoice" or laneKey "REVOICE"). NOT a
+    // ComfyUI dispatch: the clip and the target-voice reference are written to
+    // local disk and a detached `wsl.exe … python revoice.py --job` converts
+    // them, tracked via the history item's remoteJobId (kind "revoice" — the
+    // status route reads the job's sidecar). Sits BEFORE fleet worker selection
+    // and the VRAM sweep for the remotion lane's reasons plus one of its own:
+    // this is a CPU job that must be able to run WHILE a GPU lane renders, so
+    // evicting models for it would be actively harmful.
+    //
+    // The output's video bitstream is byte-identical to the input (`-c:v copy`,
+    // MD5-verified inside the script). No RIFE post: interpolation would both
+    // re-encode the copied picture and desync the audio just matched to it.
+    if (modelProfile.kind === "revoice") {
+      const videoSource = await resolveVideoBuffer(
+        { url: body.videoUrl ?? body.video, path: body.videoPath },
+        "revoice-source",
+      );
+      if (!videoSource) {
+        return NextResponse.json(
+          {
+            error:
+              "The REVOICE lane requires the clip to re-voice — pass videoUrl " +
+              "(http-fetchable mp4/webm) or videoPath (a local file on this host). " +
+              "Note this lane takes BYTES, not a ComfyUI input-dir ref: the " +
+              "conversion runs outside ComfyUI entirely.",
+          },
+          { status: 400 },
+        );
+      }
+
+      const voiceSource = await resolveAudioBuffer(
+        { url: body.audioUrl, base64: body.audioBase64, path: body.audioPath },
+        "target-voice",
+      );
+      if (!voiceSource) {
+        return NextResponse.json(
+          {
+            error:
+              "The REVOICE lane requires a target-voice reference — pass audioUrl " +
+              "(or audioBase64/audioPath): 5-15s of clean speech from the voice you " +
+              "want to HEAR. This is whose voice to wear, not what to say; for " +
+              "\"make them say these words\" use the LIP-SYNC lane instead.",
+          },
+          { status: 400 },
+        );
+      }
+
+      // Best-effort header probe (same mechanics as MATTE/FOLEY): it sizes the
+      // history item's real dimensions and rejects over-long clips honestly.
+      // A probe failure is NOT fatal — revoice.py re-probes with ffprobe and
+      // fails the job itself if the clip is unusable.
+      let revoiceProbe: VideoProbeResult | undefined;
+      try {
+        revoiceProbe = probeVideoHeader(videoSource.buffer);
+        console.log(
+          `[FrameForge] REVOICE source probed: ${revoiceProbe.durationSeconds.toFixed(2)}s` +
+            ` @ ${revoiceProbe.fps ?? "?"}fps` +
+            ` ${revoiceProbe.width ?? "?"}x${revoiceProbe.height ?? "?"} (${revoiceProbe.container})`,
+        );
+      } catch (error) {
+        console.log(
+          "[FrameForge] REVOICE source probe unavailable (" +
+            (error instanceof Error ? error.message : String(error)) +
+            ") — the converter will probe it with ffprobe instead",
+        );
+      }
+      if (
+        revoiceProbe &&
+        revoiceProbe.durationSeconds > REVOICE_MAX_SECONDS + 1e-6
+      ) {
+        return NextResponse.json(
+          {
+            error:
+              `Source clip is ${revoiceProbe.durationSeconds.toFixed(2)}s — the REVOICE lane ` +
+              `caps at ${REVOICE_MAX_SECONDS}s per job. Cut it into shorter pieces and ` +
+              `re-voice them separately — the same target-voice reference keeps the ` +
+              `speaker consistent across pieces.`,
+          },
+          { status: 400 },
+        );
+      }
+
+      // NO silent-clip guard here, deliberately. A clip with no audio track has
+      // nothing to convert, but VideoProbeResult carries no audio-track field
+      // (see src/lib/video-probe.ts — it parses the VIDEO trak only), so this
+      // route cannot answer the question without teaching that shared parser
+      // about audio tracks, and MATTE + FOLEY depend on it. revoice.py's
+      // has_audio() check rejects it instead, and does so BEFORE the ~1GB model
+      // load, so the caller gets a failed job in seconds rather than minutes.
+      // The lane descriptor documents that shape; keep them in step.
+
+      // The target-voice reference needs enough signal to characterise a
+      // timbre. Too-short references produce a wobbling, half-converted voice
+      // — a silent quality failure, so reject it rather than deliver it.
+      // NOTE: audio-probe reads WAV and MP3 only, and this guard is skipped when
+      // it cannot probe (null) rather than rejecting formats it simply cannot
+      // read. Every other container — an .m4a voice memo, most likely — is
+      // enforced by revoice.py's MIN_VOICE_SEC via ffprobe instead, which
+      // surfaces as a failed job rather than this 400. The lane descriptor says
+      // so; do not "tighten" this into a blanket rejection.
+      const voiceSeconds = probeAudioDurationSeconds(voiceSource.buffer);
+      if (
+        voiceSeconds !== null &&
+        voiceSeconds < REVOICE_MIN_VOICE_SECONDS - 1e-6
+      ) {
+        return NextResponse.json(
+          {
+            error:
+              `The target-voice reference is only ${voiceSeconds.toFixed(2)}s — the REVOICE ` +
+              `lane needs at least ${REVOICE_MIN_VOICE_SECONDS}s (5-15s is ideal) of clean ` +
+              `single-speaker audio to characterise a timbre. Shorter references produce a ` +
+              `wobbling, half-converted voice.`,
+          },
+          { status: 400 },
+        );
+      }
+
+      let queued: { jobId: string; filename: string; url: string };
+      try {
+        queued = await queueRevoiceJob(id, {
+          video: videoSource.buffer,
+          videoFilename: videoSource.filename,
+          targetVoice: voiceSource.buffer,
+          targetVoiceFilename: voiceSource.filename,
+          audioBitrate:
+            typeof body.audioBitrate === "string" && body.audioBitrate.trim()
+              ? body.audioBitrate.trim()
+              : undefined,
+          keepAudio: body.keepAudio === true || body.keepAudio === "true",
+        });
+      } catch (error) {
+        if (error instanceof RevoiceRuntimeUnavailableError) {
+          // The runtime is missing on this box: an honest 503 with the runbook,
+          // never a generic 500 (the remotion-service precedent).
+          return NextResponse.json({ error: error.message }, { status: 503 });
+        }
+        throw error;
+      }
+
+      const item: VideoGenerationItem = {
+        id,
+        status: "processing",
+        // History display: there is no prompt on this lane, so say what it did.
+        prompt:
+          prompt.trim() ||
+          `Re-voiced with the timbre of ${voiceSource.filename}`,
+        kind: "revoice",
+        remoteJobId: queued.jobId,
+        // Inherited from the source clip — this lane never chooses a geometry.
+        width: revoiceProbe?.width ?? 0,
+        height: revoiceProbe?.height ?? 0,
+        fps: revoiceProbe?.fps ?? 0,
+        frames: revoiceProbe?.frameCount ?? 0,
+        duration: revoiceProbe?.durationSeconds ?? 0,
+        resolution:
+          revoiceProbe?.width && revoiceProbe?.height
+            ? `${revoiceProbe.width}x${revoiceProbe.height}`
+            : "source",
+        sourceVideoUrl:
+          typeof body.videoUrl === "string" ? body.videoUrl : videoSource.filename,
+        sourceAudioUrl:
+          typeof body.audioUrl === "string" ? body.audioUrl : voiceSource.filename,
+        model: modelProfile.id,
+        modelName: modelProfile.name,
+        // No `worker` stamp: a CPU job in WSL, not a ComfyUI fleet worker.
+        createdAt: new Date().toISOString(),
+        progress: 0,
+      };
+
+      await addToHistory(item);
+      console.log(
+        `[FrameForge] REVOICE dispatched to WSL: job ${queued.jobId} ` +
+          `(${videoSource.filename} + ${voiceSource.filename})`,
+      );
+
+      return NextResponse.json({
+        id,
+        // No ComfyUI prompt / websocket for this lane; keep the public response
+        // shape uniform (the remotion / LTX Desktop precedent).
         comfyPromptId: "",
         clientId: "",
         status: "processing",

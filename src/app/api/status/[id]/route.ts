@@ -23,6 +23,7 @@ import {
   getRemotionJob,
   REMOTION_SERVICE_DOWN_MESSAGE,
 } from "@/lib/remotion-client";
+import { getRevoiceJobStatus } from "@/lib/revoice-client";
 import { getVideoModelProfile } from "@/lib/models";
 import { loadTemplate, patchByTitle } from "@/lib/workflow-builder";
 import type { ComfyWorkflow, VideoGenerationItem } from "@/lib/types";
@@ -112,6 +113,18 @@ export async function GET(
     // the pointers survive its restarts.
     if (item.kind === "remotion") {
       return NextResponse.json(await checkRemotionJob(id, item));
+    }
+
+    // ------------------------------------------------------------------
+    // REVOICE jobs read their WSL job sidecar, not ComfyUI history
+    // ------------------------------------------------------------------
+    // kind "revoice" items carry a remoteJobId (the WSL job id) instead of a
+    // comfyPromptId — this branch, like the remotion one, MUST sit BEFORE the
+    // "No ComfyUI prompt ID" fallback. The deliverable is written straight into
+    // public/outputs/revoice/ and served statically by Next, so there is no
+    // /api/output proxy hop (the lens-lane precedent).
+    if (item.kind === "revoice") {
+      return NextResponse.json(await checkRevoiceJob(id, item));
     }
 
     if (!item.comfyPromptId && item.model?.startsWith("ltx-desktop")) {
@@ -354,6 +367,98 @@ async function checkRemotionJob(id: string, item: VideoGenerationItem) {
   }
 
   const progress = remote.status === "rendering" ? 60 : 5;
+  if ((item.progress || 0) !== progress) {
+    await updateHistoryItem(id, { progress });
+  }
+  return {
+    id: item.id,
+    status: "processing" as const,
+    progress: Math.max(item.progress || 0, progress),
+  };
+}
+
+/**
+ * Ceiling for a REVOICE job before it is declared stalled. The converter is a
+ * DETACHED process: if WSL is shut down (or the child is OOM-killed) it dies
+ * without ever writing a terminal sidecar, and the job would otherwise poll
+ * "processing" forever. Sized well above the worst legitimate case — the
+ * lane's 600s cap on CPU, plus a cold model load and a first-run HF download.
+ */
+const REVOICE_STALL_MS = 60 * 60 * 1000;
+
+/**
+ * Read a REVOICE job's status from its sidecar (data/revoice-jobs/<id>.json),
+ * written by revoice.py via os.replace so a read never sees a partial file.
+ *
+ * The finished file is already on local disk when the sidecar flips to
+ * completed, so there is nothing to download — but it is served through
+ * /api/output?revoice=<jobId>, NOT as a static /outputs/... path: `next start`
+ * scans public/ only at boot, so a file written mid-session 404s as a static
+ * path until the next restart (measured live 2026-09-26).
+ */
+async function checkRevoiceJob(id: string, item: VideoGenerationItem) {
+  if (!item.remoteJobId) {
+    const error = "No REVOICE job id recorded";
+    await updateHistoryItem(id, { status: "failed", error });
+    return { id: item.id, status: "failed" as const, error };
+  }
+
+  const job = await getRevoiceJobStatus(item.remoteJobId);
+
+  if (job.status === "failed") {
+    const error = job.error || "Voice conversion failed in WSL";
+    await updateHistoryItem(id, { status: "failed", error });
+    return { id: item.id, status: "failed" as const, error };
+  }
+
+  if (job.status === "completed") {
+    const url =
+      job.url ||
+      `${getAppUrl()}/api/output?revoice=${encodeURIComponent(item.remoteJobId)}`;
+    const filename = job.filename || `${item.remoteJobId}.mp4`;
+    // The script refuses to report completed unless the output's video-stream
+    // MD5 matches the source's, so reaching here IS the byte-identical proof.
+    // Surface it on the item so the guarantee is auditable after the fact
+    // rather than only in a log line.
+    const warning =
+      job.video_stream_copied === false
+        ? "The video stream was re-encoded rather than copied — the picture is NOT byte-identical to the source."
+        : undefined;
+    await updateHistoryItem(id, {
+      status: "completed",
+      url,
+      filename,
+      duration: job.output_duration ?? item.duration,
+      warning,
+      progress: 100,
+    });
+    console.log(
+      `[FrameForge] REVOICE ${item.remoteJobId} completed — video stream md5 ` +
+        `${job.video_stream_md5 ?? "?"} (copied=${job.video_stream_copied ?? "?"})`,
+    );
+    return {
+      id: item.id,
+      status: "completed" as const,
+      url,
+      filename,
+      warning,
+      progress: 100,
+    };
+  }
+
+  // Still processing — but check it has not silently died (see the constant).
+  const startedAt = Date.parse(item.createdAt);
+  if (Number.isFinite(startedAt) && Date.now() - startedAt > REVOICE_STALL_MS) {
+    const error =
+      `Voice conversion stalled: no result after ${Math.round(REVOICE_STALL_MS / 60000)} ` +
+      `minutes and the converter never reported a terminal status (stage "${job.stage ?? "unknown"}"). ` +
+      `The detached WSL process most likely died — check the job log next to ` +
+      `data/revoice-jobs/${item.remoteJobId}.json, and that WSL is still up on this box.`;
+    await updateHistoryItem(id, { status: "failed", error });
+    return { id: item.id, status: "failed" as const, error };
+  }
+
+  const progress = typeof job.progress === "number" ? job.progress : 0;
   if ((item.progress || 0) !== progress) {
     await updateHistoryItem(id, { progress });
   }

@@ -95,6 +95,9 @@ export type VideoModelId =
   // Remotion MG-TYPE lane (typography/motion-graphics; renders on the think
   // render service, NOT ComfyUI — explicit selection only, never a default)
   | "mg-type"
+  // Chatterbox VC re-voice lane (REVOICE; runs a detached python in WSL on
+  // this box, NOT ComfyUI — explicit selection only, never a default)
+  | "revoice"
   // LTX ComfyUI lane (repaired, programmatic graph — legacy selectable)
   | "ltx23-prompt-faithful"
   // LTX Desktop sidecar (untouched)
@@ -1308,6 +1311,42 @@ export const VIDEO_MODEL_PROFILES: VideoModelProfile[] = [
     supportsEndImage: false,
   },
   {
+    // REVOICE — Chatterbox VC re-voice. Requires a VIDEO (the clip to dub) and
+    // an AUDIO reference (the target timbre); no prompt, no sampler, no seed.
+    // NOT a ComfyUI dispatch and NOT a generation: the picture is stream-copied
+    // (`-c:v copy`), so the output's video bitstream is byte-identical to the
+    // input. No RIFE post (interpolation would re-encode the copied picture and
+    // desync the audio just matched to it), no VRAM sweep and no fleet worker
+    // (a CPU job in WSL — it can run WHILE a GPU lane renders). Exempt from the
+    // image reroute in resolveVideoModelId (a stray image is ignored —
+    // rerouting would swap a dub of real footage for a generated clip). Never a
+    // default; explicit selection only (model "revoice" or laneKey "REVOICE").
+    id: "revoice",
+    name: "Chatterbox Re-Voice (REVOICE)",
+    shortName: "Re-Voice",
+    description:
+      "Swap WHO is speaking without re-rendering a frame: a clip + a 5-15s reference of the new voice → the same clip with that voice. Voice CONVERSION (not TTS), so the original timing, phrasing and cadence survive and the existing lip movements stay correct; the video bitstream is remuxed with -c:v copy and is byte-identical to the source (MD5-verified per job — a mismatch fails the job). MIT end to end (chatterbox-tts + ResembleAI weights), unlike XTTS/CPML. Chatterbox stamps a Perth watermark into the audio by design.",
+    kind: "revoice",
+    // Display-only: a 1.06GB MIT voice-conversion model, no ComfyUI checkpoint.
+    checkpoint: "ResembleAI/chatterbox s3gen VC (MIT) — CPU, torch 2.6.0 venv",
+    textEncoder: "none (voice conversion — no text, no prompt, no tokeniser)",
+    steps: 0,
+    videoCfg: 0,
+    audioCfg: 0,
+    // The deliverable always carries audio — that IS the deliverable.
+    includeAudio: true,
+    // Every dimension is inherited from the source clip and recorded per job
+    // from the probe; these display defaults are never patched into anything.
+    fps: 0,
+    defaultWidth: 0,
+    defaultHeight: 0,
+    defaultLength: 0,
+    requiresImage: false,
+    supportsEndImage: false,
+    requiresVideo: true,
+    requiresAudio: true,
+  },
+  {
     // REPAIRED: was distilled-lora 0.5 / 20 steps / cfg 3 — now the two-stage
     // distilled recipe (stage A 8 steps + stage B 3 steps, cfg 1,
     // euler_ancestral, lora 1.0, 1280x704 @ 25fps, frames on the 8n+1 grid).
@@ -1461,6 +1500,11 @@ export function resolveVideoModelId(
     // WAN-REPLACE takes an image (the new character) AND a video AND a mask
     // BY DESIGN — same reroute hazard as WAN-ANIMATE.
     known.kind !== "wan-replace" &&
+    // REVOICE dubs REAL footage. Rerouting on a stray image would silently
+    // swap a stream-copied dub of the caller's clip for a generated Wan clip
+    // — the exact opposite of the lane's promise (same failure shape the
+    // WAN-ANIMATE smoke test caught).
+    known.kind !== "revoice" &&
     known.kind !== "ltx-desktop"
   ) {
     // Image present on a ComfyUI request → Wan 2.2 I2V lane per routing rule.
