@@ -6,7 +6,7 @@
     },
     "_meta": {
       "title": "FF Driving Video",
-      "note": "The source clip: BOTH the performance to copy AND the real plate to preserve. Feeds background_video directly and pose_video via DWPreprocessor below — unlike WanAnimate2ToVideo, this node's whole point is that the frame is NOT regenerated from scratch."
+      "note": "The source clip: BOTH the performance to copy AND the real plate to preserve. Feeds background_video directly and pose_video via DWPreprocessor below \u2014 unlike WanAnimate2ToVideo, this node's whole point is that the frame is NOT regenerated from scratch."
     }
   },
   "2": {
@@ -19,7 +19,7 @@
     },
     "_meta": {
       "title": "FF Video Components",
-      "note": "Splits the driving video into frames / audio / fps. fps (output 2) and audio (output 1) are link-wired straight into FF Create Video, so keep_original_audio is a plain passthrough — no audio model involved, since the background (and its original audio) is preserved, not regenerated."
+      "note": "Splits the driving video into frames / audio / fps. fps (output 2) and audio (output 1) are link-wired straight into FF Create Video, so keep_original_audio is a plain passthrough \u2014 no audio model involved, since the background (and its original audio) is preserved, not regenerated."
     }
   },
   "3": {
@@ -66,7 +66,7 @@
     },
     "_meta": {
       "title": "FF UNet",
-      "note": "Wan2.2-Animate V1 (Mix/Replace mode) int8. NOT the same repo as wan_animate_2_* (that's the V2/no-mask sequel) — this is Comfy-Org/Wan_2.2_ComfyUI_Repackaged's wan2.2_animate_14B_int8_convrot.safetensors. No baked-in distilled variant exists for this model; the shared lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors LoRA is the acceleration path (NOT wired here yet — first pass uses the full base recipe for correctness, optimize to the LoRA once this is proven)."
+      "note": "Wan2.2-Animate V1 (Mix/Replace mode) int8. NOT the same repo as wan_animate_2_* (that's the V2/no-mask sequel) \u2014 this is Comfy-Org/Wan_2.2_ComfyUI_Repackaged's wan2.2_animate_14B_int8_convrot.safetensors. No baked-in distilled variant exists for this model; the shared lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors LoRA is the acceleration path (NOT wired here yet \u2014 first pass uses the full base recipe for correctness, optimize to the LoRA once this is proven)."
     }
   },
   "7": {
@@ -109,7 +109,7 @@
         "7",
         0
       ],
-      "text": "blurry, low quality, distorted face, extra limbs, watermark, text"
+      "text": "\u8272\u8c03\u8273\u4e3d, \u8fc7\u66dd, \u9759\u6001, \u7ec6\u8282\u6a21\u7cca\u4e0d\u6e05, blurry, low quality, distorted face, extra limbs, watermark, text"
     },
     "_meta": {
       "title": "FF Negative"
@@ -124,12 +124,12 @@
       ],
       "detect_hand": "enable",
       "detect_body": "enable",
-      "detect_face": "enable",
+      "detect_face": "disable",
       "resolution": 832
     },
     "_meta": {
       "title": "FF Pose Estimate",
-      "note": "comfyui_controlnet_aux's DWPose Estimator (class DWPreprocessor). Derives pose_video from the driving video's own frames — this is the piece WanAnimate2ToVideo's simpler graph never needed, since V2 has no Mix mode to drive."
+      "note": "comfyui_controlnet_aux's DWPose Estimator (class DWPreprocessor). Derives pose_video from the driving video's own frames \u2014 this is the piece WanAnimate2ToVideo's simpler graph never needed, since V2 has no Mix mode to drive."
     }
   },
   "12": {
@@ -194,7 +194,7 @@
         0
       ],
       "background_video": [
-        "2",
+        "24",
         0
       ],
       "character_mask": [
@@ -208,18 +208,22 @@
       "clip_vision_output": [
         "5",
         0
+      ],
+      "face_video": [
+        "25",
+        0
       ]
     },
     "_meta": {
       "title": "FF Replace",
-      "note": "WanAnimateToVideo (V1) — real Mix/Replace mode: background_video + character_mask means the masked region is composited onto the REAL plate, not regenerated. This is the node WAN-ANIMATE's WanAnimate2ToVideo does not have. face_video left unconnected for this first pass (optional per object_info; add if identity/expression fidelity needs it)."
+      "note": "WanAnimateToVideo (V1) \u2014 real Mix/Replace mode: background_video + character_mask means the masked region is composited onto the REAL plate, not regenerated. This is the node WAN-ANIMATE's WanAnimate2ToVideo does not have. face_video left unconnected for this first pass (optional per object_info; add if identity/expression fidelity needs it)."
     }
   },
   "16": {
     "class_type": "KSampler",
     "inputs": {
       "model": [
-        "6",
+        "23",
         0
       ],
       "positive": [
@@ -235,15 +239,15 @@
         2
       ],
       "seed": 12345,
-      "steps": 40,
-      "cfg": 5.0,
+      "steps": 6,
+      "cfg": 1.0,
       "sampler_name": "euler",
       "scheduler": "simple",
       "denoise": 1.0
     },
     "_meta": {
       "title": "FF Sampler",
-      "note": "UNOPTIMIZED FIRST PASS: base (non-distilled) recipe — 40 steps, cfg 5.0 — chosen for correctness over speed since there is no baked distilled checkpoint for V1 (unlike V2's wan_animate_2_distill_*). Tune steps/cfg and/or wire the lightx2v distill LoRA once the graph is proven end-to-end. seed patched per request."
+      "note": "UNOPTIMIZED FIRST PASS: base (non-distilled) recipe \u2014 40 steps, cfg 5.0 \u2014 chosen for correctness over speed since there is no baked distilled checkpoint for V1 (unlike V2's wan_animate_2_distill_*). Tune steps/cfg and/or wire the lightx2v distill LoRA once the graph is proven end-to-end. seed patched per request."
     }
   },
   "17": {
@@ -296,7 +300,7 @@
     },
     "_meta": {
       "title": "FF Create Video",
-      "note": "fps and audio come from the DRIVING video's own components — keep_original_audio is this passthrough; force_new_voice (not built yet) would replace input 'audio' with a voice-clone/TTS pass instead."
+      "note": "fps and audio come from the DRIVING video's own components \u2014 keep_original_audio is this passthrough; force_new_voice (not built yet) would replace input 'audio' with a voice-clone/TTS pass instead."
     }
   },
   "20": {
@@ -312,6 +316,81 @@
     },
     "_meta": {
       "title": "FF Output"
+    }
+  },
+  "21": {
+    "inputs": {
+      "lora_name": "lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
+      "strength_model": 1.0,
+      "model": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "FF Distill LoRA"
+    }
+  },
+  "22": {
+    "inputs": {
+      "lora_name": "wan2.2_animate_14B_relight_lora_bf16.safetensors",
+      "strength_model": 1.0,
+      "model": [
+        "21",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "FF Relight LoRA"
+    }
+  },
+  "23": {
+    "inputs": {
+      "shift": 8.0,
+      "model": [
+        "22",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": {
+      "title": "FF Model Sampling"
+    }
+  },
+  "24": {
+    "inputs": {
+      "image": [
+        "2",
+        0
+      ],
+      "mask": [
+        "14",
+        0
+      ],
+      "color": "0, 0, 0",
+      "device": "cpu"
+    },
+    "class_type": "DrawMaskOnImage",
+    "_meta": {
+      "title": "FF Background Blackout"
+    }
+  },
+  "25": {
+    "inputs": {
+      "image": [
+        "2",
+        0
+      ],
+      "detect_hand": "disable",
+      "detect_body": "disable",
+      "detect_face": "enable",
+      "resolution": 832
+    },
+    "class_type": "DWPreprocessor",
+    "_meta": {
+      "title": "FF Face Estimate"
     }
   }
 }
