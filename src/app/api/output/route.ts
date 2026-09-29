@@ -20,8 +20,87 @@ import {
   RemotionServiceUnreachableError,
 } from "@/lib/remotion-client";
 import { isRevoiceJobId, revoiceOutputPath } from "@/lib/revoice-client";
+import {
+  isLensJobId,
+  isSafeLensJobId,
+  lensOutputPath,
+} from "@/lib/lens-client";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * Stream a file off local disk with Range support.
+ *
+ * Shared by the REVOICE and Lens branches because both exist for the same
+ * reason — `next start` builds its static manifest at BOOT, so anything a job
+ * writes mid-session is unreachable as a static /outputs/... path until the
+ * next restart. Keeping ONE implementation matters more than the few lines it
+ * saves: the byte-range arithmetic is the part that silently serves the wrong
+ * data when it drifts, and the REVOICE smoke test asserts the returned BYTES
+ * (not just the headers), so this code path has a real gate behind it.
+ *
+ * An unparseable or out-of-bounds Range degrades to the full body rather than
+ * erroring, which is what browsers expect.
+ */
+async function streamLocalFile(opts: {
+  filePath: string;
+  contentType: string;
+  filename: string;
+  rangeHeader: string | null;
+  notFound: string;
+}): Promise<NextResponse> {
+  let size: number;
+  try {
+    size = (await stat(opts.filePath)).size;
+  } catch {
+    return NextResponse.json({ error: opts.notFound }, { status: 404 });
+  }
+
+  const baseHeaders = {
+    "Content-Type": opts.contentType,
+    "Accept-Ranges": "bytes",
+    "Content-Disposition": `inline; filename="${opts.filename}"`,
+    // Immutable per job id — same policy as the ComfyUI files.
+    "Cache-Control": "public, max-age=31536000, immutable",
+  };
+
+  const match = opts.rangeHeader?.match(/^bytes=(\d*)-(\d*)$/);
+  if (match && (match[1] || match[2])) {
+    let start = match[1] ? Number(match[1]) : 0;
+    let end = match[2] ? Number(match[2]) : size - 1;
+    if (!match[1] && match[2]) {
+      // suffix form "bytes=-500" = the LAST 500 bytes
+      start = Math.max(0, size - Number(match[2]));
+      end = size - 1;
+    }
+    if (
+      Number.isFinite(start) &&
+      Number.isFinite(end) &&
+      start <= end &&
+      start < size
+    ) {
+      end = Math.min(end, size - 1);
+      const stream = Readable.toWeb(
+        createReadStream(opts.filePath, { start, end }),
+      ) as ReadableStream;
+      return new NextResponse(stream, {
+        status: 206,
+        headers: {
+          ...baseHeaders,
+          "Content-Length": String(end - start + 1),
+          "Content-Range": `bytes ${start}-${end}/${size}`,
+        },
+      });
+    }
+  }
+
+  const stream = Readable.toWeb(
+    createReadStream(opts.filePath),
+  ) as ReadableStream;
+  return new NextResponse(stream, {
+    headers: { ...baseHeaders, "Content-Length": String(size) },
+  });
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -101,77 +180,48 @@ export async function GET(request: NextRequest) {
       }
       const variant =
         searchParams.get("variant") === "audio" ? "audio" : "primary";
-      const filePath = revoiceOutputPath(revoiceJobId, variant);
+      return streamLocalFile({
+        filePath: revoiceOutputPath(revoiceJobId, variant),
+        contentType: variant === "audio" ? "audio/wav" : "video/mp4",
+        filename: `${revoiceJobId}${variant === "audio" ? ".wav" : ".mp4"}`,
+        rangeHeader: request.headers.get("range"),
+        notFound:
+          variant === "audio"
+            ? "No standalone audio for this job (pass keepAudio on the request to emit one)"
+            : "REVOICE output not found — a completed job's file is subject "
+              + "to retention (age + size sweep in src/lib/revoice-client.ts, "
+              + "REVOICE_RETENTION_DAYS / _MAX_GB), so an older deliverable "
+              + "may have been reclaimed. Re-run the lane to regenerate it.",
+      });
+    }
 
-      let size: number;
-      try {
-        size = (await stat(filePath)).size;
-      } catch {
+    // ------------------------------------------------------------------
+    // Lens-Turbo stills passthrough (streams from local disk)
+    // ------------------------------------------------------------------
+    // Same reason as the REVOICE branch, and this one fixes a LIVE BUG: the
+    // lens lane used to hand callers a static /outputs/lens/<file>.png URL, but
+    // `next start` builds its static manifest at BOOT, so every image generated
+    // while the server was running 404'd until the next restart. Measured
+    // 2026-09-28 on this box: a freshly generated 1MB PNG returned 404 at its
+    // own advertised URL while a PNG that predated the boot returned 200 — the
+    // reason the only lens images that ever worked are the two committed to git.
+    // Serving through the API removes the boot dependency entirely.
+    const lensJobId = searchParams.get("lens");
+    if (lensJobId) {
+      if (!isLensJobId(lensJobId) || !isSafeLensJobId(lensJobId)) {
         return NextResponse.json(
-          {
-            error:
-              variant === "audio"
-                ? "No standalone audio for this job (pass keepAudio on the request to emit one)"
-                : "REVOICE output not found — a completed job's file is subject "
-                  + "to retention (age + size sweep in src/lib/revoice-client.ts, "
-                  + "REVOICE_RETENTION_DAYS / _MAX_GB), so an older deliverable "
-                  + "may have been reclaimed. Re-run the lane to regenerate it.",
-          },
-          { status: 404 },
+          { error: "Invalid Lens job id" },
+          { status: 400 },
         );
       }
-
-      const contentType = variant === "audio" ? "audio/wav" : "video/mp4";
-      const filename = `${revoiceJobId}${variant === "audio" ? ".wav" : ".mp4"}`;
-      const rangeHeader = request.headers.get("range");
-      const match = rangeHeader?.match(/^bytes=(\d*)-(\d*)$/);
-
-      // Honour a byte range so <video> seeking works; anything unparseable or
-      // out of bounds degrades to the full body rather than erroring.
-      if (match && (match[1] || match[2])) {
-        let start = match[1] ? Number(match[1]) : 0;
-        let end = match[2] ? Number(match[2]) : size - 1;
-        if (!match[1] && match[2]) {
-          // suffix form "bytes=-500" = the LAST 500 bytes
-          start = Math.max(0, size - Number(match[2]));
-          end = size - 1;
-        }
-        if (
-          Number.isFinite(start) &&
-          Number.isFinite(end) &&
-          start <= end &&
-          start < size
-        ) {
-          end = Math.min(end, size - 1);
-          const stream = Readable.toWeb(
-            createReadStream(filePath, { start, end }),
-          ) as ReadableStream;
-          return new NextResponse(stream, {
-            status: 206,
-            headers: {
-              "Content-Type": contentType,
-              "Content-Length": String(end - start + 1),
-              "Content-Range": `bytes ${start}-${end}/${size}`,
-              "Accept-Ranges": "bytes",
-              "Content-Disposition": `inline; filename="${filename}"`,
-              "Cache-Control": "public, max-age=31536000, immutable",
-            },
-          });
-        }
-      }
-
-      const stream = Readable.toWeb(
-        createReadStream(filePath),
-      ) as ReadableStream;
-      return new NextResponse(stream, {
-        headers: {
-          "Content-Type": contentType,
-          "Content-Length": String(size),
-          "Accept-Ranges": "bytes",
-          "Content-Disposition": `inline; filename="${filename}"`,
-          // Immutable per job id — same policy as the ComfyUI files.
-          "Cache-Control": "public, max-age=31536000, immutable",
-        },
+      return streamLocalFile({
+        filePath: lensOutputPath(lensJobId),
+        contentType: "image/png",
+        filename: `${lensJobId}.png`,
+        rangeHeader: request.headers.get("range"),
+        notFound:
+          "Lens output not found — the job may still be running, or its file "
+          + "was removed. Check GET /api/images/status/<jobId>.",
       });
     }
 

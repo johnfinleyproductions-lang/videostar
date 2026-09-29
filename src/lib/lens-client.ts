@@ -81,8 +81,44 @@ function toWslPath(value: string): string {
   return normalized;
 }
 
-function lensOutputUrl(filename: string): string {
-  const relative = `/outputs/lens/${filename}`;
+/**
+ * Job ids are generated here as `lens-<epoch-ms>-<uuid>`, but they come BACK
+ * from a URL query param on the read path, so they are untrusted there: anchor
+ * the shape before it is ever joined onto a filesystem path, or
+ * `?lens=../../../.env` walks out of the output directory. isLensJobId only
+ * checks the prefix (it predates the read path), which is why this is separate
+ * and both are checked.
+ */
+const LENS_JOB_ID_RE = /^lens-\d{10,}-[0-9a-fA-F-]{36}$/;
+
+export function isSafeLensJobId(value: string): boolean {
+  return LENS_JOB_ID_RE.test(value);
+}
+
+/**
+ * On-disk path of a finished job's PNG. Throws on an id that does not match the
+ * generated shape, so a caller cannot be walked out of the output directory.
+ */
+export function lensOutputPath(jobId: string): string {
+  if (!isSafeLensJobId(jobId)) {
+    throw new Error(`Not a Lens job id: ${jobId}`);
+  }
+  return path.join(LENS_OUTPUT_DIR, `${jobId}.png`);
+}
+
+/**
+ * Public URL for a finished job.
+ *
+ * Deliberately the /api/output proxy and NOT a static /outputs/lens/... path.
+ * `next start` builds its static manifest at BOOT, so a PNG written by a job
+ * while the server is running 404s at its own advertised URL until the next
+ * restart — measured on this box 2026-09-28: a freshly generated 1MB image
+ * returned 404 while one that predated the boot returned 200. That is why the
+ * only lens images that ever resolved were the two committed to git. Do not
+ * "simplify" this back to a static path.
+ */
+function lensOutputUrl(jobId: string): string {
+  const relative = `/api/output?lens=${encodeURIComponent(jobId)}`;
   return LENS_PUBLIC_BASE_URL ? `${LENS_PUBLIC_BASE_URL}${relative}` : relative;
 }
 
@@ -172,7 +208,7 @@ export async function queueLensPrompt(
     output_path: toWslPath(outputPath),
     status_path: toWslPath(statusPath),
     log_path: toWslPath(logPath),
-    public_url: lensOutputUrl(filename),
+    public_url: lensOutputUrl(id),
   };
 
   await fs.writeFile(
@@ -184,7 +220,7 @@ export async function queueLensPrompt(
         status: "processing",
         stage: "queued",
         filename,
-        url: lensOutputUrl(filename),
+        url: lensOutputUrl(id),
       },
       null,
       2,
