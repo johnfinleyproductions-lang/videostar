@@ -172,6 +172,117 @@ async function ensureRevoiceDirs(): Promise<void> {
   await fs.mkdir(REVOICE_OUTPUT_DIR, { recursive: true });
 }
 
+// ---------------------------------------------------------------------------
+// Retention
+// ---------------------------------------------------------------------------
+// This lane is the heaviest disk consumer in the app and the only one that
+// stores a FULL COPY of its input: a job writes <id>.source.mp4 (the caller's
+// whole clip) beside its deliverable, so one 50MB clip costs ~100MB. Seventeen
+// jobs reached 605MB with nothing reclaiming it. Two mechanisms, because they
+// fail differently:
+//
+//   1. Per-job input cleanup (cleanup_inputs in the job JSON): revoice.py
+//      deletes the copied source + voice reference as soon as the output is
+//      verified. They are pure duplicates of what the caller sent and nothing
+//      reads them afterwards — the status route reads only the sidecar and
+//      /api/output serves only from the output dir. On FAILURE they are kept,
+//      because that is exactly when someone needs to reproduce the job.
+//   2. Age + size sweep (below), which also catches the failure leftovers and
+//      the deliverables themselves.
+//
+// Deliberate consequence: a swept deliverable makes an OLD history item's url
+// 404. That is the right trade (the alternative is unbounded growth) and
+// /api/output answers with a retention-aware message rather than a bare 404.
+const RETENTION_DAYS = Number(process.env.REVOICE_RETENTION_DAYS || 14);
+const RETENTION_MAX_GB = Number(process.env.REVOICE_RETENTION_MAX_GB || 5);
+/** Never touch anything this new — a job in flight must not be swept. */
+const RETENTION_FLOOR_MS = 60 * 60 * 1000;
+
+interface SweepEntry {
+  file: string;
+  size: number;
+  mtimeMs: number;
+}
+
+async function listWithStats(dir: string): Promise<SweepEntry[]> {
+  const out: SweepEntry[] = [];
+  let names: string[];
+  try {
+    names = await fs.readdir(dir);
+  } catch {
+    return out;
+  }
+  for (const name of names) {
+    const file = path.join(dir, name);
+    try {
+      const s = await fs.stat(file);
+      if (s.isFile()) out.push({ file, size: s.size, mtimeMs: s.mtimeMs });
+    } catch {
+      // vanished between readdir and stat — nothing to sweep
+    }
+  }
+  return out;
+}
+
+/**
+ * Reclaim disk from finished jobs. Age first, then oldest-first until under the
+ * size cap. Never throws: a sweep failure must not fail a dispatch — the job
+ * the caller asked for matters more than the housekeeping.
+ *
+ * Returns a summary for logging, so a sweep is never silent.
+ */
+export async function sweepRevoiceRetention(): Promise<{
+  removed: number;
+  freedBytes: number;
+  reason: string[];
+}> {
+  const removed: string[] = [];
+  let freedBytes = 0;
+  const reason: string[] = [];
+
+  try {
+    const now = Date.now();
+    const cutoff = now - RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    const all = [
+      ...(await listWithStats(REVOICE_JOBS_DIR)),
+      ...(await listWithStats(REVOICE_OUTPUT_DIR)),
+    ].filter((e) => now - e.mtimeMs > RETENTION_FLOOR_MS);
+
+    const drop = async (e: SweepEntry) => {
+      try {
+        await fs.unlink(e.file);
+        removed.push(e.file);
+        freedBytes += e.size;
+      } catch {
+        // already gone / locked — skip
+      }
+    };
+
+    const aged = all.filter((e) => e.mtimeMs < cutoff);
+    for (const e of aged) await drop(e);
+    if (aged.length) reason.push(`${aged.length} file(s) older than ${RETENTION_DAYS}d`);
+
+    // Size cap over what survives the age pass, oldest first.
+    const survivors = all
+      .filter((e) => !removed.includes(e.file))
+      .sort((a, b) => a.mtimeMs - b.mtimeMs);
+    let total = survivors.reduce((n, e) => n + e.size, 0);
+    const cap = RETENTION_MAX_GB * 1024 ** 3;
+    let capped = 0;
+    for (const e of survivors) {
+      if (total <= cap) break;
+      await drop(e);
+      total -= e.size;
+      capped++;
+    }
+    if (capped) reason.push(`${capped} file(s) over the ${RETENTION_MAX_GB}GB cap`);
+  } catch (error) {
+    reason.push(`sweep aborted: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  return { removed: removed.length, freedBytes, reason };
+}
+
 async function wslCheck(args: string[]): Promise<boolean> {
   try {
     await execFileAsync(
@@ -249,6 +360,16 @@ export async function queueRevoiceJob(
     : undefined;
   const url = revoiceOutputUrl(jobId);
 
+  // Reclaim disk BEFORE writing this job's ~2x input copy, so a long-running
+  // box cannot fill up between jobs. Never fatal (see sweepRevoiceRetention).
+  const swept = await sweepRevoiceRetention();
+  if (swept.removed > 0) {
+    console.log(
+      `[FrameForge] REVOICE retention swept ${swept.removed} file(s), `
+        + `${(swept.freedBytes / 1024 ** 2).toFixed(0)}MB freed — ${swept.reason.join("; ")}`,
+    );
+  }
+
   await fs.writeFile(videoPath, params.video);
   await fs.writeFile(voicePath, params.targetVoice);
 
@@ -264,6 +385,10 @@ export async function queueRevoiceJob(
     device: REVOICE_DEVICE,
     audio_bitrate: params.audioBitrate || "192k",
     public_url: url,
+    // Drop this job's copied inputs once the output is VERIFIED — they are
+    // duplicates of what the caller sent and nothing reads them afterwards.
+    // Kept on failure, which is when they are needed to reproduce it.
+    cleanup_inputs: true,
   };
 
   // Pre-write the sidecar so a poll landing between spawn and the script's

@@ -145,7 +145,8 @@ class Status:
         os.replace(tmp, self.path)
 
 
-def convert(video, target_voice, out, device, audio_bitrate, audio_out, status):
+def convert(video, target_voice, out, device, audio_bitrate, audio_out, status,
+            cleanup_inputs=False):
     """Re-voice `video` with the timbre of `target_voice`; picture stream-copied."""
     for p in (video, target_voice):
         if not os.path.exists(p):
@@ -236,6 +237,18 @@ def convert(video, target_voice, out, device, audio_bitrate, audio_out, status):
         if audio_out:
             shutil.copy(conv, audio_out)
 
+        # Reclaim this job's input copies, now that the deliverable is verified.
+        # They are byte-duplicates of what the caller supplied (the lane stores a
+        # FULL copy of every source clip, so one 50MB clip costs ~100MB) and
+        # nothing reads them after this point. Reached only on success: on failure
+        # they are exactly what someone needs to reproduce the job.
+        if cleanup_inputs:
+            for p in (video, target_voice):
+                try:
+                    os.remove(p)
+                except OSError as exc:
+                    print(f"[revoice] could not remove input {p}: {exc}", flush=True)
+
         out_dur = probe_duration(out)
         return {
             "ok": True,
@@ -294,7 +307,8 @@ def main():
 
     try:
         result = convert(args.video, args.target_voice, args.out, args.device,
-                         args.audio_bitrate, args.audio_out, status)
+                         args.audio_bitrate, args.audio_out, status,
+                         cleanup_inputs=bool(job.get("cleanup_inputs")))
     except Exception as exc:                      # noqa: BLE001 — the sidecar IS the error channel
         detail = f"{type(exc).__name__}: {exc}"
         print(f"[revoice] FAILED {detail}", file=sys.stderr, flush=True)

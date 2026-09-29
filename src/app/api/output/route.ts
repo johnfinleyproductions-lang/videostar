@@ -112,7 +112,10 @@ export async function GET(request: NextRequest) {
             error:
               variant === "audio"
                 ? "No standalone audio for this job (pass keepAudio on the request to emit one)"
-                : "REVOICE output not found",
+                : "REVOICE output not found — a completed job's file is subject "
+                  + "to retention (age + size sweep in src/lib/revoice-client.ts, "
+                  + "REVOICE_RETENTION_DAYS / _MAX_GB), so an older deliverable "
+                  + "may have been reclaimed. Re-run the lane to regenerate it.",
           },
           { status: 404 },
         );
