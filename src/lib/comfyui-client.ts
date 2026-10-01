@@ -1,3 +1,4 @@
+import { comfyFetch, isPrivateHistory } from "./comfy-auth";
 // FrameForge — ComfyUI HTTP Client
 // IMPORTANT: Always use 127.0.0.1, NEVER localhost (IPv6 issue on CachyOS)
 //
@@ -112,7 +113,7 @@ export async function queuePrompt(
   // warning and dispatches exactly as before.
   await assertModelsPresent(base, workflow);
 
-  const res = await fetch(`${base}/prompt`, {
+  const res = await comfyFetch(`${base}/prompt`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -133,12 +134,12 @@ export async function getHistory(
   base: string,
   promptId: string
 ): Promise<ComfyUIHistoryItem | null> {
-  const res = await fetch(`${base}/history/${promptId}`);
+  const res = await comfyFetch(`${base}/history/${promptId}`);
   if (!res.ok) return null;
 
   const data = await res.json();
   // Completion signal: the prompt_id KEY exists in the history map.
-  return data[promptId] || null;
+  return isPrivateHistory(data[promptId]) ? null : data[promptId] || null;
 }
 
 export async function getOutputFile(
@@ -148,7 +149,7 @@ export async function getOutputFile(
   type: string = "output"
 ): Promise<Response> {
   const params = new URLSearchParams({ filename, subfolder, type });
-  return fetch(`${base}/view?${params}`);
+  return comfyFetch(`${base}/view?${params}`);
 }
 
 export async function uploadImage(
@@ -160,7 +161,7 @@ export async function uploadImage(
   formData.append("image", new Blob([new Uint8Array(file)]), filename);
   formData.append("overwrite", "true");
 
-  const res = await fetch(`${base}/upload/image`, {
+  const res = await comfyFetch(`${base}/upload/image`, {
     method: "POST",
     body: formData,
   });
@@ -189,7 +190,7 @@ export async function uploadInputImage(
   formData.append("subfolder", subfolder);
   formData.append("overwrite", "true");
 
-  const res = await fetch(`${base}/upload/image`, {
+  const res = await comfyFetch(`${base}/upload/image`, {
     method: "POST",
     body: formData,
   });
@@ -236,7 +237,7 @@ export async function uploadInputAudio(
   formData.append("subfolder", subfolder);
   formData.append("overwrite", "true");
 
-  const res = await fetch(`${base}/upload/image`, {
+  const res = await comfyFetch(`${base}/upload/image`, {
     method: "POST",
     body: formData,
   });
@@ -285,7 +286,7 @@ export async function uploadInputVideo(
   formData.append("subfolder", subfolder);
   formData.append("overwrite", "true");
 
-  const res = await fetch(`${base}/upload/image`, {
+  const res = await comfyFetch(`${base}/upload/image`, {
     method: "POST",
     body: formData,
   });
@@ -336,7 +337,7 @@ export async function getFileHeadBytes(
     if (!filename) return null;
 
     const params = new URLSearchParams({ filename, subfolder, type });
-    const res = await fetch(`${base}/view?${params}`, {
+    const res = await comfyFetch(`${base}/view?${params}`, {
       headers: { Range: `bytes=0-${maxBytes - 1}` },
       signal: AbortSignal.timeout(30_000),
     });
@@ -368,7 +369,7 @@ export async function getFileHeadBytes(
 }
 
 export async function getSystemStats(base: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${base}/system_stats`);
+  const res = await comfyFetch(`${base}/system_stats`);
   if (!res.ok) throw new Error(`System stats failed: ${res.status}`);
   return res.json();
 }
@@ -379,7 +380,7 @@ export async function getSystemStats(base: string): Promise<Record<string, unkno
  */
 export async function freeComfyMemory(base: string): Promise<void> {
   try {
-    const res = await fetch(`${base}/free`, {
+    const res = await comfyFetch(`${base}/free`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: AbortSignal.timeout(10_000),

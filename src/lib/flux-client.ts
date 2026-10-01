@@ -1,4 +1,5 @@
-﻿// FrameForge â€” Flux 2 ComfyUI Client
+import { comfyFetch, isPrivateHistory } from "./comfy-auth";
+// FrameForge â€” Flux 2 ComfyUI Client
 //
 // MULTI-WORKER (2026-07): like comfyui-client.ts, this module is now
 // base-agnostic — the network helpers take the target worker's ComfyUI base
@@ -164,7 +165,7 @@ export async function getFluxPreflight(
 }> {
   let res: Response;
   try {
-    res = await fetch(`${base}/object_info`, {
+    res = await comfyFetch(`${base}/object_info`, {
       cache: "no-store",
     });
   } catch {
@@ -295,7 +296,7 @@ export async function queueFluxPrompt(
   workflow: Record<string, unknown>,
   clientId: string,
 ): Promise<FluxPromptResponse> {
-  const res = await fetch(`${base}/prompt`, {
+  const res = await comfyFetch(`${base}/prompt`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -342,7 +343,7 @@ export async function uploadFluxInputImage(
   );
   form.append("overwrite", "false");
 
-  const res = await fetch(`${base}/upload/image`, {
+  const res = await comfyFetch(`${base}/upload/image`, {
     method: "POST",
     body: form,
   });
@@ -363,10 +364,10 @@ export async function getFluxHistory(
   base: string,
   promptId: string,
 ): Promise<FluxHistoryItem | null> {
-  const res = await fetch(`${base}/history/${promptId}`);
+  const res = await comfyFetch(`${base}/history/${promptId}`);
   if (!res.ok) return null;
   const data = await res.json();
-  return data[promptId] || null;
+  return isPrivateHistory(data[promptId]) ? null : data[promptId] || null;
 }
 
 export function fluxOutputUrl(
@@ -379,7 +380,7 @@ export function fluxOutputUrl(
     subfolder,
     type: "output",
   });
-  return `${resolveFluxPublicBase(internalBase)}/view?${params}`;
+  return `/api/output?${params}&stills=true`;
 }
 
 export function extractFluxImageFilename(

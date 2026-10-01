@@ -1,3 +1,4 @@
+import { comfyHeaders } from "@/lib/comfy-auth";
 // GET /api/ws?clientId=...[&worker=<name>] — SSE proxy for ComfyUI WebSocket
 // progress. Since Next.js can't natively do WebSocket upgrades, we use SSE
 // (Server-Sent Events): the frontend connects here and receives real-time
@@ -16,19 +17,20 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const clientId = searchParams.get("clientId");
 
-  if (!clientId) {
+  if (!clientId || clientId.startsWith("evergreen-private:")) {
     return new Response("clientId required", { status: 400 });
   }
 
   const comfyWsUrl = getWorkerWsBase(getWorker(searchParams.get("worker")));
 
+  const privateHeaders = await comfyHeaders(comfyWsUrl);
   const encoder = new TextEncoder();
   let wsConnection: WebSocket | null = null;
 
   const stream = new ReadableStream({
     start(controller) {
       // Connect to ComfyUI WebSocket
-      wsConnection = new WebSocket(`${comfyWsUrl}?clientId=${clientId}`);
+      wsConnection = new WebSocket(`${comfyWsUrl}?${new URLSearchParams({ clientId })}`, { headers: privateHeaders, followRedirects: false });
 
       wsConnection.on("message", (data: WebSocket.Data) => {
         try {

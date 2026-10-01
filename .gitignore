@@ -52,3 +52,7 @@ next-env.d.ts
 # HAS its job sidecars + output PNGs tracked in git — do not copy that pattern.
 /data/revoice-jobs/
 /public/outputs/revoice/
+
+# Python private image plugin caches
+__pycache__/
+*.pyc
