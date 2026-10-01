@@ -167,6 +167,17 @@ def build_graph(manifest):
     return graph
 
 
+def supports_reference():
+    encoder = nodes.NODE_CLASS_MAPPINGS.get("TextEncodeQwenImageEditPlus")
+    if encoder is None:
+        return False
+    try:
+        inputs = encoder.INPUT_TYPES()
+        return "image2" in {**inputs.get("required", {}), **inputs.get("optional", {})}
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 def ready_assets():
     required = {"diffusion_models": "qwen_image_edit_2509_fp8_e4m3fn.safetensors",
         "text_encoders": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "vae": "qwen_image_vae.safetensors"}
@@ -199,7 +210,7 @@ def start_routes(jobs):
 
     @routes.get("/evergreen-private/images")
     async def capabilities(request):
-        return web.json_response({"protocol": PROTOCOL, "ok": ready_assets(), "twoImages": True, "steps": 20,
+        return web.json_response({"protocol": PROTOCOL, "ok": ready_assets(), "twoImages": supports_reference(), "steps": 20,
             "encryptedStorage": True, "noPublicPreviews": True}, headers=headers)
 
     @routes.post("/evergreen-private/images")
@@ -217,6 +228,8 @@ def start_routes(jobs):
             body = json.loads(payload)
             if set(body) - {"id", "source", "reference", "instruction", "seed", "width", "height"}:
                 raise ValueError("Unexpected private job fields")
+            if body.get("reference") and not supports_reference():
+                return web.json_response({"error": "Second image input unavailable"}, status=503, headers=headers)
             source = base64.b64decode(body["source"], validate=True)
             reference = base64.b64decode(body["reference"], validate=True) if body.get("reference") else None
             manifest, fresh = jobs.reserve(body["id"], source, reference, body["instruction"], body["seed"], body["width"], body["height"])

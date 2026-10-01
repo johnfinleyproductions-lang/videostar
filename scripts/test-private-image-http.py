@@ -60,7 +60,7 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
             "text_encoders": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "vae": "qwen_image_vae.safetensors"}
         mod("folder_paths", get_filename_list=lambda folder: [assets[folder]],
             get_input_directory=lambda: str(self.base / "public-input"), get_output_directory=lambda: str(self.base / "public-output"))
-        mod("nodes", NODE_CLASS_MAPPINGS={"TextEncodeQwenImageEditPlus": object},
+        mod("nodes", NODE_CLASS_MAPPINGS={"TextEncodeQwenImageEditPlus": SimpleNamespace(INPUT_TYPES=lambda: {"optional": {"image2": ("IMAGE",)}})},
             KSampler=SimpleNamespace(INPUT_TYPES=lambda: {"required": {}}))
         os.environ.pop("EVERGREEN_PRIVATE_IMAGE_KEY_FILE", None)
         os.environ.pop("EVERGREEN_PRIVATE_IMAGE_ROOT", None)
@@ -94,6 +94,7 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get(base, headers={"Authorization": "Bearer wrong"})).status, 401)
         capabilities = await (await self.client.get(base, headers=self.auth)).json()
         self.assertEqual(capabilities["protocol"], "evergreen-private-images-v1")
+        self.assertTrue(capabilities["twoImages"])
         for _ in range(2):
             response = await self.client.post(base, headers=self.auth, json=self.payload)
             self.assertEqual(response.status, 200)
@@ -119,6 +120,15 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.client.post(base + "/" + self.id + "/ack", headers=self.auth, json={"sha256": digest})).status, 200)
         self.assertEqual((await self.client.get(base + "/" + self.id + "/output", headers=self.auth)).status, 404)
         self.assertFalse(list((self.base / "jobs").rglob("*.sealed")))
+
+    async def test_reference_capability_matches_encoder_inputs(self):
+        base = "/evergreen-private/images"
+        sys.modules["nodes"].NODE_CLASS_MAPPINGS["TextEncodeQwenImageEditPlus"] = SimpleNamespace(INPUT_TYPES=lambda: {"required": {}})
+        capabilities = await (await self.client.get(base, headers=self.auth)).json()
+        self.assertTrue(capabilities["ok"])
+        self.assertFalse(capabilities["twoImages"])
+        self.assertEqual((await self.client.post(base, headers=self.auth, json=self.payload)).status, 503)
+        self.assertFalse(self.queued)
 
     async def test_erasure_tombstone_and_reserved_websocket_are_closed(self):
         base = "/evergreen-private/images"
