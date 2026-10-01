@@ -150,9 +150,9 @@ def build_graph(manifest):
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "type": "qwen_image", "device": "cpu"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_vae.safetensors"}},
         "4": {"class_type": "TextEncodeQwenImageEditPlus", "inputs": {"clip": ["2", 0], "prompt": ["13", 0], "vae": ["3", 0], "image1": ["10", 0]}},
-        "5": {"class_type": "TextEncodeQwenImageEditPlus", "inputs": {"clip": ["2", 0], "prompt": "", "vae": ["3", 0]}},
+        "5": {"class_type": "TextEncodeQwenImageEditPlus", "inputs": {"clip": ["2", 0], "prompt": "", "vae": ["3", 0], "image1": ["10", 0]}},
         "6": {"class_type": "VAEEncode", "inputs": {"pixels": ["10", 0], "vae": ["3", 0]}},
-        "7": {"class_type": "EvergreenPrivateSampler", "inputs": {**private, "model": ["12", 0], "positive": ["4", 0],
+        "7": {"class_type": "EvergreenPrivateSampler", "inputs": {**private, "model": ["14", 0], "positive": ["4", 0],
             "negative": ["5", 0], "latent_image": ["6", 0], "seed": manifest["seed"], "steps": 20, "cfg": 2.5,
             "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}},
         "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
@@ -160,10 +160,12 @@ def build_graph(manifest):
         "10": {"class_type": "EvergreenPrivateImage", "inputs": {**private, "slot": "source"}},
         "12": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["1", 0], "shift": 3.0}},
         "13": {"class_type": "EvergreenPrivateInstruction", "inputs": private.copy()},
+        "14": {"class_type": "CFGNorm", "inputs": {"model": ["12", 0], "strength": 1}},
     }
     if manifest["reference"]:
         graph["11"] = {"class_type": "EvergreenPrivateImage", "inputs": {**private, "slot": "reference"}}
         graph["4"]["inputs"]["image2"] = ["11", 0]
+        graph["5"]["inputs"]["image2"] = ["11", 0]
     return graph
 
 
@@ -181,7 +183,8 @@ def supports_reference():
 def ready_assets():
     required = {"diffusion_models": "qwen_image_edit_2509_fp8_e4m3fn.safetensors",
         "text_encoders": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "vae": "qwen_image_vae.safetensors"}
-    return all(name in folder_paths.get_filename_list(folder) for folder, name in required.items()) and "TextEncodeQwenImageEditPlus" in nodes.NODE_CLASS_MAPPINGS
+    return (all(name in folder_paths.get_filename_list(folder) for folder, name in required.items())
+        and all(name in nodes.NODE_CLASS_MAPPINGS for name in ["TextEncodeQwenImageEditPlus", "CFGNorm"]))
 
 
 def start_routes(jobs):

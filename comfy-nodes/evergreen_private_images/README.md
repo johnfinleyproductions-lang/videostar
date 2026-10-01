@@ -11,6 +11,19 @@ remain closed until installation, ordinary-client regression checks, real model
 visual acceptance, and release/deployment checks pass. Tests never use personal
 photos or the production database.
 
+The first actual fictional-person face edit failed visual review. A graph audit
+found the negative conditioning omitted the source/reference images. Both
+conditioning branches now receive the same photos, matching the
+[official Comfy Qwen 2509 workflow](https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/templates/image_qwen_image_edit_2509.json).
+The audit also found missing `CFGNorm` guidance normalization. Both workflows
+now include it at strength 1 and capabilities require the installed node. CPU
+validation passes against the installed runtime; one-input and two-input
+conditioning and model routing have focused regressions. The corrected graph
+materially improves texture, but the reviewed output still changes head framing
+and produces visible seams with the rectangular composite. Real face acceptance
+remains open. Synthetic public model experiments
+do not verify the private serving boundary; no personal photos were dispatched.
+
 ## Private boundary
 
 - `/evergreen-private/images` and all job/status/output/ack/DELETE routes always

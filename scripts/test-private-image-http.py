@@ -62,6 +62,7 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
             get_input_directory=lambda: str(self.base / "public-input"), get_output_directory=lambda: str(self.base / "public-output"))
         mod("nodes", NODE_CLASS_MAPPINGS={"TextEncodeQwenImageEditPlus": SimpleNamespace(INPUT_TYPES=lambda: {"optional": {"image2": ("IMAGE",)}})},
             KSampler=SimpleNamespace(INPUT_TYPES=lambda: {"required": {}}))
+        sys.modules["nodes"].NODE_CLASS_MAPPINGS["CFGNorm"] = object()
         os.environ.pop("EVERGREEN_PRIVATE_IMAGE_KEY_FILE", None)
         os.environ.pop("EVERGREEN_PRIVATE_IMAGE_ROOT", None)
         package = Path(__file__).resolve().parents[1] / "comfy-nodes/evergreen_private_images"
@@ -103,6 +104,10 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
         graph = self.queued[0][2]
         self.assertEqual(self.queued[0][3]["client_id"], "evergreen-private:" + self.id)
         self.assertEqual(graph["4"]["inputs"]["image2"], ["11", 0])
+        self.assertEqual(graph["5"]["inputs"]["image1"], ["10", 0])
+        self.assertEqual(graph["5"]["inputs"]["image2"], ["11", 0])
+        self.assertEqual(graph["14"], {"class_type": "CFGNorm", "inputs": {"model": ["12", 0], "strength": 1}})
+        self.assertEqual(graph["7"]["inputs"]["model"], ["14", 0])
         authorization = graph["10"]["inputs"]["authorization"]
         source = self.plugin.PrivateImage().load(self.id, "source", authorization, graph)[0]
         self.assertEqual(source.shape, (1, 768, 768, 3))
@@ -129,6 +134,16 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(capabilities["twoImages"])
         self.assertEqual((await self.client.post(base, headers=self.auth, json=self.payload)).status, 503)
         self.assertFalse(self.queued)
+
+    async def test_single_image_has_matching_visual_conditioning(self):
+        payload = {key: value for key, value in self.payload.items() if key != "reference"}
+        response = await self.client.post("/evergreen-private/images", headers=self.auth, json=payload)
+        self.assertEqual(response.status, 200)
+        graph = self.queued[0][2]
+        for identity in ["4", "5"]:
+            self.assertEqual(graph[identity]["inputs"]["image1"], ["10", 0])
+            self.assertNotIn("image2", graph[identity]["inputs"])
+        self.assertNotIn("11", graph)
 
     async def test_erasure_tombstone_and_reserved_websocket_are_closed(self):
         base = "/evergreen-private/images"

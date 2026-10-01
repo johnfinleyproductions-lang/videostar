@@ -450,6 +450,10 @@ function buildQwenImageEditWorkflow(
       class_type: "ModelSamplingAuraFlow",
       inputs: { model: ["1", 0], shift: 3.0 },
     },
+    "14": {
+      class_type: "CFGNorm",
+      inputs: { model: ["12", 0], strength: 1 },
+    },
     "5": {
       class_type: "TextEncodeQwenImageEditPlus",
       inputs: { clip: ["2", 0], prompt: negativePrompt, vae: ["3", 0] },
@@ -462,6 +466,9 @@ function buildQwenImageEditWorkflow(
   };
 
   if (referenceImage) {
+    // Match the native Qwen workflow: both CFG branches see the same photos.
+    workflow["5"].inputs.image1 = ["10", 0];
+    if (referenceImage2) workflow["5"].inputs.image2 = ["11", 0];
     workflow["10"] = {
       class_type: "LoadImage",
       inputs: { image: referenceImage },
@@ -493,7 +500,7 @@ function buildQwenImageEditWorkflow(
   workflow["7"] = {
     class_type: "KSampler",
     inputs: {
-      model: ["12", 0],
+      model: ["14", 0],
       positive: ["4", 0],
       negative: ["5", 0],
       latent_image: ["6", 0],
