@@ -24,7 +24,8 @@ photos or the production database.
   sanitized history inputs; log details are withheld while private jobs run.
 - The entire graph is signed and pinned. Adding SaveImage, redirecting a private
   input, changing nodes, or removing the private output invalidates access.
-  Private nodes always reauthorize, bypass cached output reuse, and sampling has
+  A replay through generic prompt dispatch still receives a reserved private
+  client identity. Private nodes always reauthorize, bypass cached output reuse, and sampling has
   no public latent preview callback. Reserved private websocket IDs are refused.
 - Execution cache references are released after a private graph finishes. This
   does not promise physical RAM/VRAM zeroization. Normal graph caches are retained.

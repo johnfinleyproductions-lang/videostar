@@ -18,8 +18,12 @@ def install_runtime_boundary(server, executor_class):
 
     def private_execute(self, prompt, prompt_id, extra_data=None, execute_outputs=None):
         private = private_graph(prompt)
+        data = extra_data or {}
+        if private:
+            # Also isolate a signed graph replayed through generic /prompt.
+            data = {**data, "client_id": "evergreen-private:" + prompt_id}
         try:
-            return execute(self, prompt, prompt_id, extra_data or {}, execute_outputs or [])
+            return execute(self, prompt, prompt_id, data, execute_outputs or [])
         finally:
             if private:
                 # Clear every dependency cache, including generated text and pixels.

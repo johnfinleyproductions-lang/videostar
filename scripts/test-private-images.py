@@ -174,7 +174,7 @@ class PrivateJobTests(unittest.TestCase):
 
         runtime.install_runtime_boundary(server, Executor)
         executor = Executor()
-        executor.execute(self.graph, self.identity, {"client_id": "evergreen-private:" + self.identity}, [])
+        executor.execute(self.graph, self.identity, {"client_id": "ordinary-client"}, [])
         self.assertFalse(executor.success)
         self.assertEqual(executor.status_messages, ["failure preserved"])
         self.assertEqual(executor.caches, {})
