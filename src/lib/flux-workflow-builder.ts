@@ -124,6 +124,7 @@ export interface FluxWorkflowParams {
   cfg?: number;
   seed?: number;
   referenceImage?: string;
+  referenceImage2?: string;
   denoise?: number;
   model?: ImageModel;
 }
@@ -425,6 +426,7 @@ function buildQwenImageEditWorkflow(
     negativePrompt = "",
     seed = Math.floor(Math.random() * 1_000_000_000_000),
     referenceImage,
+    referenceImage2,
   } = params;
   const width = clampDimension(params.width, 1024);
   const height = clampDimension(params.height, 1024);
@@ -466,13 +468,18 @@ function buildQwenImageEditWorkflow(
     };
     workflow["4"] = {
       class_type: "TextEncodeQwenImageEditPlus",
-      inputs: { clip: ["2", 0], prompt, vae: ["3", 0], image1: ["10", 0] },
+      inputs: { clip: ["2", 0], prompt, vae: ["3", 0], image1: ["10", 0],
+        ...(referenceImage2 ? { image2: ["11", 0] } : {}) },
+    };
+    if (referenceImage2) workflow["11"] = {
+      class_type: "LoadImage", inputs: { image: referenceImage2 },
     };
     workflow["6"] = {
       class_type: "VAEEncode",
       inputs: { pixels: ["10", 0], vae: ["3", 0] },
     };
   } else {
+    if (referenceImage2) throw new Error("A second reference requires a source image.");
     workflow["4"] = {
       class_type: "TextEncodeQwenImageEditPlus",
       inputs: { clip: ["2", 0], prompt, vae: ["3", 0] },

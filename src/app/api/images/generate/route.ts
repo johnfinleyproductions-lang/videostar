@@ -55,6 +55,7 @@ export async function POST(request: NextRequest) {
       guidance_scale: guidanceScale,
       seed,
       referenceImage,
+      referenceImage2,
       denoise,
       model,
       repo_id: repoId,
@@ -73,6 +74,11 @@ export async function POST(request: NextRequest) {
         : typeof repoId === "string"
           ? repoId
           : undefined;
+
+    if (referenceImage2 !== undefined && (requestedModel !== "qwen-image-edit" || typeof referenceImage !== "string" ||
+        !referenceImage.startsWith("data:image/") || typeof referenceImage2 !== "string" || !referenceImage2.startsWith("data:image/"))) {
+      return NextResponse.json({ error: "Two-image Qwen editing requires source and reference image data." }, { status: 400 });
+    }
 
     if (isLensModel(requestedModel)) {
       const preflight = await getLensPreflight();
@@ -139,6 +145,8 @@ export async function POST(request: NextRequest) {
         referenceImage,
       );
     }
+    const resolvedReferenceImage2 = typeof referenceImage2 === "string"
+      ? await uploadFluxInputImage(fluxBase, referenceImage2) : referenceImage2;
 
     const workflow = buildFluxWorkflow({
       prompt,
@@ -149,6 +157,7 @@ export async function POST(request: NextRequest) {
       cfg,
       seed,
       referenceImage: resolvedReferenceImage,
+      referenceImage2: resolvedReferenceImage2,
       denoise,
       model,
     });

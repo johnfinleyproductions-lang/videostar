@@ -11,6 +11,7 @@
 // and status polling must land on the same worker every time.
 
 import { resolveWorkerForLane } from "./fleet";
+import { randomUUID } from "node:crypto";
 
 /** ComfyUI base for the FLUX/Z-Image stills lane (see module note above). */
 export function resolveFluxComfyBase(): string {
@@ -326,15 +327,20 @@ export async function uploadFluxInputImage(
     throw new Error("Reference image must be a base64 image data URL");
   }
   const [, mime, encoded] = match;
+  if (!["image/png", "image/jpeg", "image/webp"].includes(mime.toLowerCase()) || encoded.length > 28 * 1024 * 1024) {
+    throw new Error("Reference image must be a PNG, JPEG or WebP up to 20 MB");
+  }
   const ext = mime === "image/jpeg" ? "jpg" : mime.slice("image/".length);
-  const filename = `frameforge-ref-${Date.now()}.${ext}`;
+  const bytes = Buffer.from(encoded, "base64");
+  if (!bytes.length || bytes.length > 20 * 1024 * 1024) throw new Error("Reference image exceeds 20 MB");
+  const filename = `frameforge-ref-${randomUUID()}.${ext}`;
   const form = new FormData();
   form.append(
     "image",
-    new Blob([Buffer.from(encoded, "base64")], { type: mime }),
+    new Blob([bytes], { type: mime }),
     filename,
   );
-  form.append("overwrite", "true");
+  form.append("overwrite", "false");
 
   const res = await fetch(`${base}/upload/image`, {
     method: "POST",
