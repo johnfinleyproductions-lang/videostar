@@ -1,3 +1,4 @@
+import { comfyFetch } from "./comfy-auth";
 // FrameForge — ComfyUI model preflight (ticket comfy-workflow-model-preflight)
 //
 // THE PROBLEM (the "two-comfy landmine"): a lane can be dispatched to a worker
@@ -235,7 +236,7 @@ async function lookupEnum(
 
   // "RIFE VFI" is a real class_type — with a space. Always URL-encode.
   const url = `${base}/object_info/${encodeURIComponent(classType)}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+  const res = await comfyFetch(url, { signal: AbortSignal.timeout(timeoutMs) });
   if (!res.ok) throw new Error(`object_info HTTP ${res.status}`);
   const body: unknown = await res.json();
 

@@ -1,4 +1,5 @@
-﻿// FrameForge â€” Flux 2 ComfyUI Client
+import { comfyFetch, isPrivateHistory } from "./comfy-auth";
+// FrameForge â€” Flux 2 ComfyUI Client
 //
 // MULTI-WORKER (2026-07): like comfyui-client.ts, this module is now
 // base-agnostic — the network helpers take the target worker's ComfyUI base
@@ -11,6 +12,7 @@
 // and status polling must land on the same worker every time.
 
 import { resolveWorkerForLane } from "./fleet";
+import { randomUUID } from "node:crypto";
 
 /** ComfyUI base for the FLUX/Z-Image stills lane (see module note above). */
 export function resolveFluxComfyBase(): string {
@@ -163,7 +165,7 @@ export async function getFluxPreflight(
 }> {
   let res: Response;
   try {
-    res = await fetch(`${base}/object_info`, {
+    res = await comfyFetch(`${base}/object_info`, {
       cache: "no-store",
     });
   } catch {
@@ -294,7 +296,7 @@ export async function queueFluxPrompt(
   workflow: Record<string, unknown>,
   clientId: string,
 ): Promise<FluxPromptResponse> {
-  const res = await fetch(`${base}/prompt`, {
+  const res = await comfyFetch(`${base}/prompt`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -326,17 +328,22 @@ export async function uploadFluxInputImage(
     throw new Error("Reference image must be a base64 image data URL");
   }
   const [, mime, encoded] = match;
+  if (!["image/png", "image/jpeg", "image/webp"].includes(mime.toLowerCase()) || encoded.length > 28 * 1024 * 1024) {
+    throw new Error("Reference image must be a PNG, JPEG or WebP up to 20 MB");
+  }
   const ext = mime === "image/jpeg" ? "jpg" : mime.slice("image/".length);
-  const filename = `frameforge-ref-${Date.now()}.${ext}`;
+  const bytes = Buffer.from(encoded, "base64");
+  if (!bytes.length || bytes.length > 20 * 1024 * 1024) throw new Error("Reference image exceeds 20 MB");
+  const filename = `frameforge-ref-${randomUUID()}.${ext}`;
   const form = new FormData();
   form.append(
     "image",
-    new Blob([Buffer.from(encoded, "base64")], { type: mime }),
+    new Blob([bytes], { type: mime }),
     filename,
   );
-  form.append("overwrite", "true");
+  form.append("overwrite", "false");
 
-  const res = await fetch(`${base}/upload/image`, {
+  const res = await comfyFetch(`${base}/upload/image`, {
     method: "POST",
     body: form,
   });
@@ -357,10 +364,10 @@ export async function getFluxHistory(
   base: string,
   promptId: string,
 ): Promise<FluxHistoryItem | null> {
-  const res = await fetch(`${base}/history/${promptId}`);
+  const res = await comfyFetch(`${base}/history/${promptId}`);
   if (!res.ok) return null;
   const data = await res.json();
-  return data[promptId] || null;
+  return isPrivateHistory(data[promptId]) ? null : data[promptId] || null;
 }
 
 export function fluxOutputUrl(
@@ -373,7 +380,7 @@ export function fluxOutputUrl(
     subfolder,
     type: "output",
   });
-  return `${resolveFluxPublicBase(internalBase)}/view?${params}`;
+  return `/api/output?${params}&stills=true`;
 }
 
 export function extractFluxImageFilename(

@@ -17,6 +17,18 @@ Two halves talking over your LAN:
 
 Flow: Browser → FrameForge UI builds a ComfyUI workflow → POSTs it to ComfyUI → model runs on the Blackwell → video comes back → download.
 
+### Visual Editor two-photo Qwen adapter (October 2026)
+
+The `qwen-image-edit` graph accepts an optional `referenceImage2` from
+Evergreen Core. Image 1 is the selected source area and image 2 is the
+replacement person's reference. The graph wires image 2 into
+`TextEncodeQwenImageEditPlus` while the edit latent still comes from image 1.
+`node --test scripts/qwen-two-image.test.mjs` checks both graph shapes without
+running the GPU. This adapter is staged; do not route private user photos
+through the shared ComfyUI input/output directories until they have a scoped
+retention and cleanup contract, and the live two-photo graph passes with
+synthetic images.
+
 ---
 
 ## ✅ GPU STATUS: WORKING — VIDEO GENERATION CONFIRMED (Session 13, April 7 2026)

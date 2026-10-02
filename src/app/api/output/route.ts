@@ -1,3 +1,4 @@
+import { resolveFluxComfyBase } from "@/lib/flux-client";
 // GET /api/output?filename=...&subfolder=...[&worker=<name>] — Proxy ComfyUI
 // output files from the fleet worker that rendered them (worker omitted =
 // the default worker — every pre-fleet URL keeps working unchanged; the
@@ -248,7 +249,10 @@ export async function GET(request: NextRequest) {
     }
 
     // Fleet worker that holds the file (missing/unknown → default worker).
-    const comfyBase = getWorkerComfyBase(searchParams.get("worker"));
+    const comfyBase = searchParams.get("stills") === "true" ? resolveFluxComfyBase() : getWorkerComfyBase(searchParams.get("worker"));
+    if (!/^[A-Za-z0-9_. -]+$/.test(filename) || filename.includes("..") || subfolder.split(/[\\/]/).some(part => part === ".." || part === ".") || /^[\\/]/.test(subfolder) || subfolder.includes(":")) {
+      return NextResponse.json({ error: "Invalid output path" }, { status: 400 });
+    }
     const comfyResponse = await getOutputFile(comfyBase, filename, subfolder);
 
     if (!comfyResponse.ok) {
@@ -266,6 +270,9 @@ export async function GET(request: NextRequest) {
     // and downstream probes misread them.
     const extension = filename.slice(filename.lastIndexOf(".")).toLowerCase();
     const FALLBACK_CONTENT_TYPES: Record<string, string> = {
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".webp": "image/webp",
       ".webm": "video/webm",
       ".mkv": "video/x-matroska",
       ".mp3": "audio/mpeg",
