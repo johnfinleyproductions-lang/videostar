@@ -172,7 +172,10 @@ class PrivateJobs:
             return signature
 
     def signature(self, graph):
-        unsigned = {key: {**node, "inputs": {k: v for k, v in node["inputs"].items() if k != "authorization"}}
+        # Comfy adds this transient cache fingerprint during execution. It is
+        # not a workflow input; every class, input, link and other field is pinned.
+        unsigned = {key: {**{k: v for k, v in node.items() if k != "is_changed"},
+                          "inputs": {k: v for k, v in node["inputs"].items() if k != "authorization"}}
                     for key, node in graph.items()}
         return hmac.new(self.sign_key, canonical(unsigned), hashlib.sha256).hexdigest()
 

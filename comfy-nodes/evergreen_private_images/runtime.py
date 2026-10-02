@@ -20,6 +20,11 @@ def install_runtime_boundary(server, executor_class):
         private = private_graph(prompt)
         data = extra_data or {}
         if private:
+            # Discard caller-supplied fingerprints on generic signed replays.
+            # Start empty so no private node can be skipped through a cache hit.
+            prompt = {key: {k: v for k, v in node.items() if k != "is_changed"}
+                      for key, node in prompt.items()}
+            self.reset()
             # Also isolate a signed graph replayed through generic /prompt.
             data = {**data, "client_id": "evergreen-private:" + prompt_id}
         try:

@@ -24,6 +24,16 @@ and produces visible seams with the rectangular composite. Real face acceptance
 remains open. Synthetic public model experiments
 do not verify the private serving boundary; no personal photos were dispatched.
 
+## Installed runtime compatibility
+
+The first installed private edit exposed Comfy’s transient node-level
+`is_changed` cache fingerprint. Signatures now ignore only that runtime field;
+classes, inputs, links and all other fields remain pinned. Private execution
+strips caller fingerprints and clears caches before and after execution, so a
+generic signed replay cannot bypass private-node reauthorization through cached
+outputs. The focused lifecycle regression covers both normalization and replay.
+Production AI editing remains closed until fresh installed inference passes.
+
 ## Private boundary
 
 - `/evergreen-private/images` and all job/status/output/ack/DELETE routes always
