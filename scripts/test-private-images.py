@@ -77,6 +77,16 @@ class PrivateJobTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.store.verify_graph(self.identity, tag, modified)
 
+    def test_runtime_fingerprint_is_ignored_but_inputs_remain_pinned(self):
+        tag = self.active()
+        changed = copy.deepcopy(self.graph)
+        for node in changed.values():
+            node["is_changed"] = [float("nan")]
+        self.store.verify_graph(self.identity, tag, changed)
+        changed["1"]["inputs"]["is_changed"] = "caller input"
+        with self.assertRaises(ValueError):
+            self.store.verify_graph(self.identity, tag, changed)
+
     def test_core_crash_before_ack_keeps_output_but_removes_inputs(self):
         self.active()
         self.store.complete(self.identity, self.source)
@@ -161,6 +171,9 @@ class PrivateJobTests(unittest.TestCase):
                 self.success, self.status_messages = True, []
 
             def execute(self, prompt, prompt_id, extra_data, outputs):
+                if any(node["class_type"].startswith("EvergreenPrivate") for node in prompt.values()):
+                    self_test.assertEqual(self.caches, {})
+                    self_test.assertTrue(all("is_changed" not in node for node in prompt.values()))
                 server.client_id = extra_data.get("client_id")
                 self.caches = {"pixels": b"private pixels", "instruction": "private instruction"}
                 self.success = False
@@ -173,8 +186,13 @@ class PrivateJobTests(unittest.TestCase):
                 errors.append(args[-2])
 
         runtime.install_runtime_boundary(server, Executor)
+        self_test = self
         executor = Executor()
-        executor.execute(self.graph, self.identity, {"client_id": "ordinary-client"}, [])
+        executor.caches = {"pixels": b"stale cached pixels"}
+        graph = copy.deepcopy(self.graph)
+        for node in graph.values():
+            node["is_changed"] = "caller fingerprint"
+        executor.execute(graph, self.identity, {"client_id": "ordinary-client"}, [])
         self.assertFalse(executor.success)
         self.assertEqual(executor.status_messages, ["failure preserved"])
         self.assertEqual(executor.caches, {})
