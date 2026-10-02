@@ -1,0 +1,27 @@
+name: private image release checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  private-images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci
+      - run: python -m pip install cryptography aiohttp pillow numpy
+      - run: node scripts/comfy-auth.test.mjs
+      - run: node scripts/qwen-two-image.test.mjs
+      - run: python scripts/test-private-images.py
+      - run: python scripts/test-private-image-http.py
