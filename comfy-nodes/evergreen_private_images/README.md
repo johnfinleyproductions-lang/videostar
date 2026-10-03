@@ -21,6 +21,36 @@ and angle LoRA are absent. Installed Qwen 2.1 remains excluded: its research
 license requires a separate commercial license for commercial use. This change
 does not install dependencies, download models, or modify Windows startup.
 
+### Installed expansion acceptance, October 3
+
+PR #11 (`1ea0a85`, plugin source `9df929c`) was installed with a rollback copy at
+`/home/evergreen/evergreen-worker-backups/20261003-before-9df929c`.
+The existing Interactive-only task did not execute when the ordinary restart
+command reported success. The operator used the installed `vidbox-mode.ps1 clean`
+guard, then launched the unchanged installed worker launcher through the established
+detached recovery path. No task registration, startup policy or security changed.
+
+The actual private SAM3.1 job on the fictional two-person acceptance fixture
+returned two correct, visually reviewed person outlines (scores 0.983 and 0.977,
+78 and 119 vertices). Its output digest matched; acknowledgement returned 404 on
+subsequent output reads and left zero sealed payload files. LAN authentication
+checks returned 401 for private, queue and history routes and 200 for health.
+
+The first actual viewpoint job failed in `UnetLoaderGGUF`. A CPU metadata check
+found the installed 16,852,417,120-byte file was entirely sparse, with an all-zero
+header and zero allocated bytes. There was no valid alternative in configured
+stores. Viewpoint readiness now requires the pinned GGUF v3 header and fails
+closed for missing, truncated or zero-filled assets. This is a quick admission
+check, not a substitute for a verified checksum and installed inference.
+
+The proposed repair asset is Apache-2.0
+[`unsloth/Qwen-Image-Edit-2511-GGUF`](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF/blob/0d33d9692b4b26212297240d87b0d4719aa4fd06/qwen-image-edit-2511-Q6_K.gguf),
+revision `0d33d9692b4b26212297240d87b0d4719aa4fd06`, SHA256
+`fdc28e5b8f7d9cfe0399fd1700c375f25f000fc4159bbdb0d4a809ae898eb759`.
+Automatic approval review rejected the live model download before execution;
+repair and the viewpoint visual gate await explicit approval. Preserve the
+existing asset until a separately staged replacement passes its full checksum.
+
 ### Expansion protocol
 
 The protocol remains `evergreen-private-images-v1`. Existing image jobs retain
