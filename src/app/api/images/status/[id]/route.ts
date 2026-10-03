@@ -8,6 +8,7 @@ import {
   resolveFluxComfyBase,
 } from "@/lib/flux-client";
 import { getLensJobStatus, isLensJobId } from "@/lib/lens-client";
+import { getMingJobStatus, isMingJobId } from "@/lib/ming-client";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -21,6 +22,9 @@ export async function GET(
 
     if (isLensJobId(id)) {
       return NextResponse.json(await getLensJobStatus(id));
+    }
+    if (isMingJobId(id)) {
+      return NextResponse.json(await getMingJobStatus(id));
     }
 
     // Same deterministic stills worker the dispatch used (see flux-client).

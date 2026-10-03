@@ -576,6 +576,22 @@ export async function POST(request: NextRequest) {
     }
     const modelProfile = getVideoModelProfile(modelId);
 
+    // Text-to-video-only profiles (FastH3: FL2VA was not distilled) refuse a
+    // start/end still here — before worker selection and before any input
+    // bytes are uploaded — rather than conditioning on a frame the model was
+    // never trained to honor. The MINIMAX-H3-FAST lane never reaches this:
+    // its imageModelId already sent image requests to "minimax-h3".
+    if (modelProfile.textOnly && (hasImage || endImagePresent)) {
+      return NextResponse.json(
+        {
+          error:
+            `${modelProfile.id} is text-to-video only (its distill never learned start/end-frame conditioning) — ` +
+            'drop the image, or use model "minimax-h3" (laneKey "MINIMAX-H3-FAST" reroutes image requests there automatically)',
+        },
+        { status: 400 },
+      );
+    }
+
     // ------------------------------------------------------------------
     // Remotion MG-TYPE lane (motion graphics — proxied to think)
     // ------------------------------------------------------------------
