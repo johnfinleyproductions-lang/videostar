@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 MAX_BYTES = 20 * 1024 * 1024
 TTL_SECONDS = 24 * 60 * 60
 MAX_JOBS = 1000
-SLOTS = {"source", "reference", "instruction", "output"}
+SLOTS = {"source", "reference", "reference2", "instruction", "output"}
 
 
 def job_id(value):
@@ -122,18 +122,32 @@ class PrivateJobs:
             encrypted = file.read_bytes()
             return self.cipher.decrypt(encrypted[:12], encrypted[12:], (identity + ":" + slot).encode())
 
-    def reserve(self, identity, source, reference, instruction, seed, width, height):
+    def reserve(self, identity, source, reference, instruction, seed, width, height, reference2=None, operation=None):
         job_id(identity)
+        if operation not in {None, "selection", "viewpoint"}:
+            raise ValueError("Invalid private operation")
+        if reference2 is not None and reference is None:
+            raise ValueError("The third image requires the second image")
+        if operation is not None and (reference is not None or reference2 is not None):
+            raise ValueError("This operation accepts a single source")
         if any(type(value) is not int for value in (seed, width, height)) or not 0 <= seed <= 0x7FFFFFFF or not 768 <= width <= 1536 or not 768 <= height <= 1536 or width % 32 or height % 32:
             raise ValueError("Invalid pinned image settings")
-        if not isinstance(instruction, str) or not 10 <= len(instruction) <= 4000:
+        if not isinstance(instruction, str) or not (1 if operation == "selection" else 10) <= len(instruction) <= (120 if operation == "selection" else 4000):
             raise ValueError("Invalid edit instruction")
-        for data in [source, *([reference] if reference is not None else [])]:
+        if operation == "selection" and (not instruction.strip() or any(c in instruction for c in ":,()\r\n\x00")):
+            raise ValueError("Use one short object description")
+        for data in [source, *([reference] if reference is not None else []), *([reference2] if reference2 is not None else [])]:
             if not data or len(data) > MAX_BYTES or not data.startswith(b"\x89PNG\r\n\x1a\n"):
                 raise ValueError("Private jobs accept only bounded canonical PNGs")
-        request_hash = hashlib.sha256(canonical({"source": hashlib.sha256(source).hexdigest(),
+        request = {"source": hashlib.sha256(source).hexdigest(),
             "reference": hashlib.sha256(reference).hexdigest() if reference else None,
-            "instruction": instruction, "seed": seed, "width": width, "height": height})).hexdigest()
+            "instruction": instruction, "seed": seed, "width": width, "height": height}
+        # Preserve the byte-for-byte legacy identity when additions are absent.
+        if reference2 is not None:
+            request["reference2"] = hashlib.sha256(reference2).hexdigest()
+        if operation is not None:
+            request["operation"] = operation
+        request_hash = hashlib.sha256(canonical(request)).hexdigest()
         with self.lock:
             self.expire()
             directory = self._directory(identity)
@@ -149,10 +163,16 @@ class PrivateJobs:
                 self._write_blob(identity, "source", source)
                 if reference is not None:
                     self._write_blob(identity, "reference", reference)
+                if reference2 is not None:
+                    self._write_blob(identity, "reference2", reference2)
                 self._write_blob(identity, "instruction", instruction.encode())
                 manifest = {"id": identity, "requestHash": request_hash, "state": "reserved", "createdAt": self.clock(),
                     "expiresAt": self.clock() + TTL_SECONDS, "seed": seed, "width": width, "height": height,
                     "reference": reference is not None}
+                if reference2 is not None:
+                    manifest["reference2"] = True
+                if operation is not None:
+                    manifest["operation"] = operation
                 self._save_manifest(identity, manifest)
                 return manifest, True
             except BaseException:
