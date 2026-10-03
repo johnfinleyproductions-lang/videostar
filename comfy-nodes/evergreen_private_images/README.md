@@ -6,6 +6,27 @@ Comfy modality remains the model runtime.
 
 ## Release state
 
+### Experimental fast preview
+
+The optional image request `profile: "fast12-v1"` uses the existing Qwen 2509
+model with 12 sampling steps at the same working dimensions. Omit the field for
+the unchanged 20-step graph and legacy request identity. The profile is included
+in the request hash and encrypted-job manifest; the same ID cannot change speeds.
+Capability `speedProfiles: ["fast12-v1"]` allows clients to fail closed on older
+workers. Sampling telemetry must match the exact profile total. Selections and
+viewpoint requests reject this profile; reference images remain supported.
+
+This is an experiment, not a distilled or Lightning model. The
+[Qwen model example](https://huggingface.co/Qwen/Qwen-Image-Edit-2509/blob/main/README.md)
+uses 40 steps; the separate
+[LightX2V 4/8-step workflows](https://github.com/ModelTC/LightX2V-Qwen-Image-Lightning)
+require their matching adapters, which are not installed on this worker.
+Reduced-step quality and speed must pass a real paired comparison before release.
+Keep the source, references, instruction, seed and working dimensions identical,
+measure preparation/sampling/total time, and review subject preservation, reference
+likeness and visual artifacts. Do not label fixture timings as model benchmarks.
+No model download, dependency install, startup task or security change is included.
+
 ### October 3 expansion plan
 
 - [x] Preserve legacy image identities while adding an encrypted third input.
@@ -157,7 +178,7 @@ Production AI editing remains closed until fresh installed inference passes.
 
 Active job status may include `progress` with `phase` set to `queued`,
 `preparing`, `sampling`, or `finishing`. Only sampling includes integer
-`completedSteps` and `totalSteps` (the pinned workflow has 20 steps). The ratio
+`completedSteps` and `totalSteps` (20 steps normally; 12 for `fast12-v1`). The ratio
 describes sampling only, not total completion time. Model loading, text/image
 encoding, decoding, transfer, and Core compositing also take time. Older workers
 return `processing` without progress; clients must support that response.

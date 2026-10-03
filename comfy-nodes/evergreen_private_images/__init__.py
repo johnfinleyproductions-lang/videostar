@@ -218,7 +218,8 @@ def build_graph(manifest):
         "5": {"class_type": "TextEncodeQwenImageEditPlus", "inputs": {"clip": ["2", 0], "prompt": "", "vae": ["3", 0], "image1": ["10", 0]}},
         "6": {"class_type": "VAEEncode", "inputs": {"pixels": ["10", 0], "vae": ["3", 0]}},
         "7": {"class_type": "EvergreenPrivateSampler", "inputs": {**private, "model": ["14", 0], "positive": ["4", 0],
-            "negative": ["5", 0], "latent_image": ["6", 0], "seed": manifest["seed"], "steps": 20, "cfg": 2.5,
+            "negative": ["5", 0], "latent_image": ["6", 0], "seed": manifest["seed"],
+            "steps": 12 if manifest.get("profile") == "fast12-v1" else 20, "cfg": 2.5,
             "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}},
         "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
         "9": {"class_type": "EvergreenPrivateOutput", "inputs": {**private, "images": ["8", 0]}},
@@ -325,7 +326,7 @@ def start_routes(jobs):
             "threeImages": supports_reference("image3"), "maxReferences": 2 if supports_reference("image3") else (1 if supports_reference() else 0),
             "selections": {"ready": ready_assets("selection"), "model": "sam3.1"},
             "viewpoints": {"ready": ready_assets("viewpoint"), "model": "qwen-image-edit-2511-q6"},
-            "layers": {"ready": False}, "scalarProgress": True}, headers=headers)
+            "layers": {"ready": False}, "scalarProgress": True, "speedProfiles": ["fast12-v1"]}, headers=headers)
 
     @routes.post("/evergreen-private/images")
     async def create(request):
@@ -347,7 +348,7 @@ def start_routes(jobs):
                     return web.json_response({"error": "Image payload too large"}, status=413, headers=headers)
             body = json.loads(payload)
             allowed = {"id", "source", "query", "width", "height"} if selection else {
-                "id", "source", "reference", "reference2", "instruction", "seed", "width", "height", "operation"}
+                "id", "source", "reference", "reference2", "instruction", "seed", "width", "height", "operation", "profile"}
             if not isinstance(body, dict) or set(body) - allowed:
                 raise ValueError("Unexpected private job fields")
             operation = "selection" if selection else body.get("operation")
@@ -363,7 +364,8 @@ def start_routes(jobs):
             reference = base64.b64decode(body["reference"], validate=True) if body.get("reference") else None
             reference2 = base64.b64decode(body["reference2"], validate=True) if body.get("reference2") else None
             manifest, fresh = jobs.reserve(body["id"], source, reference, body["query"] if selection else body["instruction"],
-                0 if selection else body["seed"], body["width"], body["height"], reference2=reference2, operation=operation)
+                0 if selection else body["seed"], body["width"], body["height"], reference2=reference2, operation=operation,
+                profile=body.get("profile"))
             if fresh:
                 graph = build_graph(manifest)
                 # Validate without logging private inputs or instructions.

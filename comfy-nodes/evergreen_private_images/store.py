@@ -122,10 +122,12 @@ class PrivateJobs:
             encrypted = file.read_bytes()
             return self.cipher.decrypt(encrypted[:12], encrypted[12:], (identity + ":" + slot).encode())
 
-    def reserve(self, identity, source, reference, instruction, seed, width, height, reference2=None, operation=None):
+    def reserve(self, identity, source, reference, instruction, seed, width, height, reference2=None, operation=None, profile=None):
         job_id(identity)
         if operation not in {None, "selection", "viewpoint"}:
             raise ValueError("Invalid private operation")
+        if profile not in {None, "fast12-v1"} or (profile is not None and operation is not None):
+            raise ValueError("Invalid private speed profile")
         if reference2 is not None and reference is None:
             raise ValueError("The third image requires the second image")
         if operation is not None and (reference is not None or reference2 is not None):
@@ -147,6 +149,8 @@ class PrivateJobs:
             request["reference2"] = hashlib.sha256(reference2).hexdigest()
         if operation is not None:
             request["operation"] = operation
+        if profile is not None:
+            request["profile"] = profile
         request_hash = hashlib.sha256(canonical(request)).hexdigest()
         with self.lock:
             self.expire()
@@ -173,6 +177,8 @@ class PrivateJobs:
                     manifest["reference2"] = True
                 if operation is not None:
                     manifest["operation"] = operation
+                if profile is not None:
+                    manifest["profile"] = profile
                 self._save_manifest(identity, manifest)
                 return manifest, True
             except BaseException:
@@ -199,7 +205,7 @@ class PrivateJobs:
             raise ValueError("Invalid private progress phase")
         value = {"phase": phase}
         if phase == "sampling":
-            if type(completed_steps) is not int or type(total_steps) is not int or total_steps != 20 or not 0 <= completed_steps <= total_steps:
+            if type(completed_steps) is not int or type(total_steps) is not int or total_steps not in {12, 20} or not 0 <= completed_steps <= total_steps:
                 raise ValueError("Invalid private sampling progress")
             value.update(completedSteps=completed_steps, totalSteps=total_steps)
         elif completed_steps is not None or total_steps is not None:
@@ -210,6 +216,8 @@ class PrivateJobs:
                 return
             if phase == "sampling" and manifest.get("operation") == "selection":
                 raise ValueError("Selection jobs do not have sampling steps")
+            if phase == "sampling" and total_steps != (12 if manifest.get("profile") == "fast12-v1" else 20):
+                raise ValueError("Sampling steps do not match the pinned profile")
             previous = manifest.get("progress", {})
             if phases.get(previous.get("phase"), -1) > phases[phase]:
                 return

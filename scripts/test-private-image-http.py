@@ -54,8 +54,9 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
 
         def synthetic_sample(*args, **kw):
             self.sample_calls.append(kw)
-            for step in range(20):
-                kw["callback"](step, object(), object(), 20)
+            steps = args[2]
+            for step in range(steps):
+                kw["callback"](step, object(), object(), steps)
                 self.progress_samples.append(self.plugin.JOBS.status(self.id)["progress"])
             return np.zeros((1, 4, 8, 8))
 
@@ -152,6 +153,47 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.client.post(base + "/" + self.id + "/ack", headers=self.auth, json={"sha256": digest})).status, 200)
         self.assertEqual((await self.client.get(base + "/" + self.id + "/output", headers=self.auth)).status, 404)
         self.assertFalse(list((self.base / "jobs").rglob("*.sealed")))
+
+    async def test_fast_profile_changes_only_steps_and_pins_retry_progress(self):
+        base = "/evergreen-private/images"
+        capabilities = await (await self.client.get(base, headers=self.auth)).json()
+        self.assertEqual(capabilities["steps"], 20)
+        self.assertEqual(capabilities["speedProfiles"], ["fast12-v1"])
+        self.assertEqual((await self.client.post(base, headers=self.auth, json=self.payload)).status, 200)
+        standard_graph = self.queued[-1][2]
+        self.assertEqual(standard_graph["7"]["inputs"]["steps"], 20)
+        self.id = str(uuid.uuid4())
+        fast = {**self.payload, "id": self.id, "profile": "fast12-v1"}
+        for _ in range(2):
+            self.assertEqual((await self.client.post(base, headers=self.auth, json=fast)).status, 200)
+        self.assertEqual(len(self.queued), 2)
+        self.assertEqual((await self.client.post(base, headers=self.auth, json={**self.payload, "id": self.id})).status, 400)
+        graph = self.queued[-1][2]
+        self.assertEqual(graph["7"]["inputs"]["steps"], 12)
+        for node_id in graph:
+            actual, expected = json.loads(json.dumps(graph[node_id])), json.loads(json.dumps(standard_graph[node_id]))
+            for item in [actual, expected]:
+                item["inputs"].pop("identity", None)
+                item["inputs"].pop("authorization", None)
+            if node_id == "7":
+                expected["inputs"]["steps"] = 12
+            self.assertEqual(actual, expected)
+        authorization = graph["10"]["inputs"]["authorization"]
+        tampered = json.loads(json.dumps(graph))
+        tampered["7"]["inputs"]["steps"] = 20
+        with self.assertRaises(ValueError):
+            self.plugin.JOBS.verify_graph(self.id, authorization, tampered)
+        self.plugin.PrivateSampler().sample(self.id, authorization, graph, object(), 42, 12, 2.5,
+            "euler", "simple", object(), object(), {"samples": np.zeros((1, 4, 8, 8))})
+        self.assertEqual(self.progress_samples, [
+            {"phase": "sampling", "completedSteps": step, "totalSteps": 12} for step in range(1, 13)])
+        self.assertEqual(self.public_events, [])
+        for changes in [{"profile": "fast4-v1"}, {"profile": "fast12-v1", "operation": "viewpoint", "reference": None}]:
+            self.assertEqual((await self.client.post(base, headers=self.auth,
+                json={**self.payload, "id": str(uuid.uuid4()), **changes})).status, 400)
+        self.assertEqual((await self.client.post("/evergreen-private/selections", headers=self.auth,
+            json={"id": str(uuid.uuid4()), "source": self.payload["source"], "query": "person", "width": 768,
+                "height": 768, "profile": "fast12-v1"})).status, 400)
 
     async def test_reference_capability_matches_encoder_inputs(self):
         base = "/evergreen-private/images"
