@@ -70,6 +70,7 @@ export type LaneKey =
   | "MUSIC"
   | "HV-HUMANS"
   | "MINIMAX-H3"
+  | "MINIMAX-H3-FAST"
   | "H3-R2V"
   | "SVI-CHAIN"
   | "LTX-I2V"
@@ -701,6 +702,29 @@ export const LANES: readonly LaneDescriptor[] = [
     supportsAudio: profile("minimax-h3").includeAudio === true,
     outputFormat: "mp4",
     typicalRenderMinutes: 8,
+  },
+  {
+    // FastH3 (added 2026-10-03): FastVideo's DMD2 8-step distill of the H3
+    // text-to-AV partition — ~2.3x faster picture on the same "vidbox-sidecar"
+    // worker, near-silent native audio (measured), so it is the B-roll lane
+    // for shots that sit under voiceover or music. FL2VA was not distilled:
+    // a start image reroutes to the full MINIMAX-H3 profile via imageModelId
+    // (the minimax-h3-fast profile itself is textOnly and 400s an image).
+    laneKey: "MINIMAX-H3-FAST",
+    title: "FastH3 — fast MiniMax H3 B-roll",
+    description:
+      "MiniMax-H3 picture at ~2.3x the speed (FastVideo 8-step distill): 1344x768 @ 24fps, ~5s on the 17k+5 grid. Text-to-video — with a start image this lane runs full MiniMax H3 instead. Its audio comes out near-silent, so use it for B-roll under voiceover or music. Explicit selection; needs the v0.30 sidecar running.",
+    kind: "minimax-h3",
+    executor: "generate",
+    endpoint: "/api/generate",
+    modelId: "minimax-h3-fast",
+    imageModelId: "minimax-h3",
+    requiresImage: false,
+    acceptsImage: true,
+    textOnly: false,
+    supportsAudio: profile("minimax-h3-fast").includeAudio === true,
+    outputFormat: "mp4",
+    typicalRenderMinutes: 3,
   },
   {
     // MiniMax-H3 REFERENCE-TO-VIDEO (lane 20, proven 2026-08-28/29 — full

@@ -429,6 +429,14 @@ const TEMPLATES = {
       "MODEL_HIGH", "MODEL_LOW", "SAMPLER_1", "SAMPLER_2",
     ],
   },
+  // MiniMax-H3 omni AV templates — patched by buildMiniMaxH3() (see
+  // H3_TEMPLATE_TITLES). minimax_h3_fast.json is the FastH3 8-step variant.
+  "minimax_h3.json": {
+    required: ["FF H3 Video", "FF Seed", "FF Output"],
+  },
+  "minimax_h3_fast.json": {
+    required: ["FF H3 Video", "FF Seed", "FF Output"],
+  },
   "wan22_flf2v.json": {
     required: [
       "POS_PROMPT", "NEG_PROMPT", "INPUT_IMAGE", "END_IMAGE", "SEED", "LENGTH",

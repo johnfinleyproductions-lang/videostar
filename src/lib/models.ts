@@ -61,6 +61,10 @@ export type VideoModelId =
   // MiniMax-H3 omni AV lane (33B fp8 on the v0.30 sidecar worker: video WITH
   // native stereo audio in one pass; explicit selection only, never a default)
   | "minimax-h3"
+  // FastH3: FastVideo DMD2 8-step distill of the H3 text-to-AV partition
+  // (same v0.30 sidecar worker) — ~2.3x faster picture, near-silent audio,
+  // text-to-video ONLY (FL2VA/Ref2VA were not distilled)
+  | "minimax-h3-fast"
   // MiniMax-H3 Reference-to-Video lanes (comfy-master gm instance :8193 via
   // the vidbox-gm worker): up to 4 identity/environment/prop refs bound by
   // <Picture i> tags + optional GuideMaster keyframe pins. draft = 0.5MP
@@ -146,6 +150,13 @@ export interface VideoModelProfile {
   supportsEndImage?: boolean;
   /** Requires an input image (no T2V fallback inside the lane). */
   requiresImage?: boolean;
+  /**
+   * Text-to-video ONLY: the checkpoint was never trained on start/end-frame
+   * conditioning (FastH3 — FL2VA was not distilled). The generate route
+   * refuses an image/endImage for such a profile (400) instead of feeding
+   * the template a still the model cannot honor.
+   */
+  textOnly?: boolean;
   /**
    * Requires an input voiceover (LIP-SYNC lane): the generate route must
    * receive audioUrl (or audioBase64/audioPath) and 400s without it — there
@@ -858,6 +869,43 @@ export const VIDEO_MODEL_PROFILES: VideoModelProfile[] = [
     defaultLength: 124, // 17k+5 grid, ~5.2s @ 24fps
     requiresImage: false,
     supportsEndImage: true,
+  },
+  {
+    // FastH3 — FastVideo's DMD2 8-step distill of MiniMax-H3's text-to-AV
+    // partition (trained with VSA-H3 80% sparse attention; ComfyUI runs it
+    // dense, which works). Template-locked in src/workflows/minimax_h3_fast.json:
+    // FastVideo-FastH3 int8_convrot unet + MiniMaxH3SigmaShift (video 10 /
+    // audio 3, the trained schedule) + simple/8 steps + "lcm" (the DMD
+    // denoise -> re-noise step; euler measured darker and murkier). Same
+    // builder + "vidbox-sidecar" worker as minimax-h3 (kind "minimax-h3").
+    // MEASURED 2026-10-03 on the PRO 4500 (864x480x124f, matched prompt/seed):
+    // ~55 s warm vs ~125 s for minimax-h3, picture on par — but the native
+    // audio comes out near-silent (-60..-67 dB mean; 2 of 3 runs inaudible),
+    // so includeAudio is false: a VIDEO lane for B-roll under VO/music.
+    // textOnly: an explicit image request 400s; laneKey MINIMAX-H3-FAST sends
+    // image requests to minimax-h3 via imageModelId. Explicit selection only.
+    id: "minimax-h3-fast",
+    name: "FastH3 (MiniMax H3, 8-step)",
+    shortName: "FastH3",
+    description:
+      "Fast MiniMax-H3 text-to-video: FastVideo DMD2 8-step distill (int8), ~2.3x faster than MiniMax H3 with matching picture, 1344x768 @ 24fps on the 17k+5 grid (124 ≈ 5s). Native audio comes out near-silent — use it for B-roll under voiceover or music. Text-to-video only. Runs on the v0.30 sidecar worker. Explicit selection only.",
+    kind: "minimax-h3",
+    backend: "comfyui",
+    templateFile: "minimax_h3_fast.json",
+    // Display-only mirrors of the template-locked recipe values.
+    checkpoint: "fastvideo_fasth3_8step_v2_pruned_int8_convrot.safetensors",
+    textEncoder: "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+    steps: 8,
+    videoCfg: 1,
+    audioCfg: 0,
+    includeAudio: false,
+    fps: 24,
+    defaultWidth: 1344,
+    defaultHeight: 768,
+    defaultLength: 124, // 17k+5 grid, ~5.2s @ 24fps
+    requiresImage: false,
+    textOnly: true,
+    supportsEndImage: false,
   },
   {
     // MiniMax-H3 REFERENCE-TO-VIDEO (proven 2026-08-28/29, recipe in
