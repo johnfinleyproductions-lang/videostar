@@ -36,6 +36,13 @@ returned two correct, visually reviewed person outlines (scores 0.983 and 0.977,
 subsequent output reads and left zero sealed payload files. LAN authentication
 checks returned 401 for private, queue and history routes and 200 for health.
 
+One real three-input Qwen2509 job completed using that fictional source and
+separate blue/gold color references. The right shirt changed to the requested
+gold from image three; the model also tightened framing. This verifies the third
+input executes, not exact full-image preservation. The output digest matched,
+acknowledged output returned 404, and no sealed payloads remained. Core's reviewed
+selection/compositing boundary is still necessary when other pixels must stay put.
+
 The first actual viewpoint job failed in `UnetLoaderGGUF`. A CPU metadata check
 found the installed 16,852,417,120-byte file was entirely sparse, with an all-zero
 header and zero allocated bytes. There was no valid alternative in configured
