@@ -153,6 +153,37 @@ Production AI editing remains closed until fresh installed inference passes.
 
 ## Configuration and installation
 
+### Private scalar progress
+
+Active job status may include `progress` with `phase` set to `queued`,
+`preparing`, `sampling`, or `finishing`. Only sampling includes integer
+`completedSteps` and `totalSteps` (the pinned workflow has 20 steps). The ratio
+describes sampling only, not total completion time. Model loading, text/image
+encoding, decoding, transfer, and Core compositing also take time. Older workers
+return `processing` without progress; clients must support that response.
+
+The private sampler callback records only scalar counters in the existing
+owner-only manifest. It ignores and does not retain latent tensors, create
+previews, log callback payloads, or emit websocket events. Phase/step regressions
+are ignored, invalid counters are refused, and completion/erasure/expiry removes
+progress. Startup reconciliation still fails interrupted jobs and clears their
+private payloads. This uses no additional service, model, credential or port.
+
+Before installing a progress update, inspect authenticated Comfy queue counts
+and active private manifests without printing graphs, instructions, credentials,
+or photos. Wait for running and pending queues to empty and Core to save pending
+results. Back up the installed plugin and stage these tracked files, then use
+the existing guarded restart. Never restart for progress while an edit is active.
+Afterward verify protected status access and one synthetic edit progressing
+through sampling; old saved outputs must remain recoverable. Roll back the
+plugin files with the same idle check if necessary.
+
+Read-only compatibility verification on October 3, 2026 confirmed the installed
+`comfy/samplers.py` computes `total_steps = len(sigmas) - 1` and invokes the
+callback as `(step, denoised, latent, total_steps)`. Synthetic local checks pass
+for all 20 callbacks, authenticated status, erasure/restart cleanup and ordinary
+client graphs. Installed inference and rollout still need their own receipt.
+
 Set both `EVERGREEN_PRIVATE_IMAGE_KEY_FILE` and `EVERGREEN_PRIVATE_IMAGE_ROOT`
 **in the serving Comfy launch environment**. The key file is an absolute,
 owner-only regular file containing a fresh 64-character lowercase hexadecimal
@@ -186,8 +217,8 @@ From the VideoStar checkout, with the installed runtime's dependencies:
 - `python scripts/test-private-images.py` — storage, erasure, crashes, expiry,
   graph signing, failure sanitization and cache release.
 - `python scripts/test-private-image-http.py` — actual authenticated HTTP,
-  repeated admission, signed three-image/selection/viewpoint graphs, disabled
-  sampler callbacks, output digest acknowledgement, erasure and reserved
+  repeated admission, signed three-image/selection/viewpoint graphs,
+  numeric-only sampler callbacks, output digest acknowledgement, erasure and reserved
   websocket denial.
 - `python scripts/test-private-selections.py` — separate instances, holes,
   nested islands, bounded vertices and refusal of invalid/overcomplex masks.

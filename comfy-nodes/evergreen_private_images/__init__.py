@@ -109,8 +109,24 @@ class PrivateSampler:
         noise = comfy.sample.prepare_noise(latent, seed, latent_image.get("batch_index"))
         # Do not use common_ksampler: its callback sends decodable private
         # latent previews to every connected public websocket client.
+        def record_progress(phase, completed_steps=None, total_steps=None):
+            try:
+                JOBS.progress(identity, phase, completed_steps, total_steps)
+            except (OSError, ValueError, KeyError):
+                # Telemetry cannot turn a valid edit into a failed generation.
+                pass
+
+        record_progress("sampling", 0, steps)
+
+        def progress(step, _denoised, _latent, total_steps):
+            # Deliberately ignore tensors. This callback never creates previews,
+            # emits events, or retains the callback arguments.
+            if type(step) is int and type(total_steps) is int:
+                record_progress("sampling", step + 1, total_steps)
+
         samples = comfy.sample.sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent,
-            denoise=denoise, noise_mask=latent_image.get("noise_mask"), callback=None, disable_pbar=True, seed=seed)
+            denoise=denoise, noise_mask=latent_image.get("noise_mask"), callback=progress, disable_pbar=True, seed=seed)
+        record_progress("finishing")
         result = latent_image.copy()
         result.pop("downscale_ratio_spacial", None)
         result.pop("downscale_ratio_temporal", None)
@@ -267,7 +283,20 @@ def ready_assets(operation=None):
 
 def start_routes(jobs):
     server = PromptServer.instance
-    install_runtime_boundary(server, execution.PromptExecutor)
+
+    def private_start(graph):
+        # A generic signed replay may have a different queue ID. Bind telemetry
+        # to the verified private identity, never to caller-supplied queue data.
+        try:
+            node = next(node for node in graph.values() if node.get("class_type", "").startswith("EvergreenPrivate"))
+            inputs = node["inputs"]
+            jobs.verify_graph(inputs["identity"], inputs["authorization"], graph)
+            jobs.progress(inputs["identity"], "preparing")
+        except (OSError, ValueError, KeyError, StopIteration):
+            # Private nodes independently refuse an invalid or erased graph.
+            pass
+
+    install_runtime_boundary(server, execution.PromptExecutor, private_start)
 
     @web.middleware
     async def authentication(request, handler):
@@ -296,7 +325,7 @@ def start_routes(jobs):
             "threeImages": supports_reference("image3"), "maxReferences": 2 if supports_reference("image3") else (1 if supports_reference() else 0),
             "selections": {"ready": ready_assets("selection"), "model": "sam3.1"},
             "viewpoints": {"ready": ready_assets("viewpoint"), "model": "qwen-image-edit-2511-q6"},
-            "layers": {"ready": False}}, headers=headers)
+            "layers": {"ready": False}, "scalarProgress": True}, headers=headers)
 
     @routes.post("/evergreen-private/images")
     async def create(request):
@@ -370,7 +399,10 @@ def start_routes(jobs):
             if state == "completed":
                 return web.json_response({"status": "completed", "sha256": manifest["outputSha256"],
                     "contentType": "application/json" if manifest.get("operation") == "selection" else "image/png"}, headers=headers)
-            return web.json_response({"status": "processing" if state in {"reserved", "processing"} else "failed"}, headers=headers)
+            result = {"status": "processing" if state in {"reserved", "processing"} else "failed"}
+            if result["status"] == "processing" and "progress" in manifest:
+                result["progress"] = manifest["progress"]
+            return web.json_response(result, headers=headers)
         except (ValueError, KeyError):
             return web.json_response({"status": "failed"}, headers=headers)
 

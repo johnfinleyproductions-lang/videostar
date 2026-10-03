@@ -11,7 +11,7 @@ def private_graph(graph):
     return any(node.get("class_type", "").startswith("EvergreenPrivate") for node in graph.values())
 
 
-def install_runtime_boundary(server, executor_class):
+def install_runtime_boundary(server, executor_class, on_private_start=None):
     execute = executor_class.execute
     handle_error = executor_class.handle_execution_error
     send_sync = server.send_sync
@@ -28,6 +28,8 @@ def install_runtime_boundary(server, executor_class):
             # Also isolate a signed graph replayed through generic /prompt.
             data = {**data, "client_id": "evergreen-private:" + prompt_id}
         try:
+            if private and on_private_start is not None:
+                on_private_start(prompt)
             return execute(self, prompt, prompt_id, data, execute_outputs or [])
         finally:
             if private:
