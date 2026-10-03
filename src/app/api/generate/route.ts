@@ -1030,6 +1030,9 @@ export async function POST(request: NextRequest) {
     let videoName: string | undefined;
     let maskName: string | undefined;
     let maskIsImage = false;
+    // WAN-REPLACE only: the mask is an ALPHA webm (e.g. the MATTE lane's own
+    // deliverable) — buildWanReplace then reads the alpha plane, not red.
+    let maskHasAlpha = false;
     let matteFps: number | undefined;
     let matteSeconds: number | undefined;
     // MATTE only: real duration/fps/dimensions read off the source header
@@ -1107,15 +1110,14 @@ export async function POST(request: NextRequest) {
           { status: 400 },
         );
       }
-      maskName = (
-        await resolveVideoRef(
-          comfyBase,
-          { url: body.maskUrl, path: body.maskPath, ref: body.mask },
-          "mask",
-          `jobs/${id}`,
-          "mask",
-        )
-      )?.ref;
+      const maskSource = await resolveVideoRef(
+        comfyBase,
+        { url: body.maskUrl, path: body.maskPath, ref: body.mask },
+        "mask",
+        `jobs/${id}`,
+        "mask",
+      );
+      maskName = maskSource?.ref;
       // resolveVideoRef returns null ONLY when no mask source was supplied
       // (a supplied-but-broken maskUrl/maskPath throws → 500 above); so a
       // missing maskName here really means "omitted". VACE editing and
@@ -1150,6 +1152,37 @@ export async function POST(request: NextRequest) {
             },
             { status: 400 },
           );
+        }
+        if (wantsWanReplace) {
+          // Which kind of mask video is this? The template reads a
+          // white-subject-on-black video's RED channel; the MATTE lane
+          // delivers the matte in a VP9 ALPHA plane over the original
+          // picture, where the red channel is just the source footage.
+          // Header-probe the file (bytes already in hand for url/path
+          // sources, a Range-fetched head for pass-through refs) and switch
+          // buildWanReplace to the alpha branch when AlphaMode=1. Best-effort:
+          // an unprobeable mask keeps the red-channel path, logged.
+          const maskHead =
+            maskSource?.bytes ??
+            (await getFileHeadBytes(comfyBase, maskName, VIDEO_PROBE_HEAD_BYTES));
+          if (maskHead) {
+            try {
+              maskHasAlpha = probeVideoHeader(maskHead).alpha === true;
+              console.log(
+                `[FrameForge] WAN-REPLACE mask ${maskHasAlpha ? "has an ALPHA plane — reading the matte from alpha (VHS_LoadVideoFFmpeg)" : "has no alpha plane — reading the matte from the red channel"}`,
+              );
+            } catch (error) {
+              console.log(
+                "[FrameForge] WAN-REPLACE mask probe unavailable (" +
+                  (error instanceof Error ? error.message : String(error)) +
+                  ") — reading the matte from the red channel",
+              );
+            }
+          } else {
+            console.log(
+              "[FrameForge] WAN-REPLACE mask head unreadable — reading the matte from the red channel",
+            );
+          }
         }
         if (wantsMatte && !maskIsImage) {
           return NextResponse.json(
@@ -1707,6 +1740,7 @@ export async function POST(request: NextRequest) {
         videoName,
         referenceName: imageName,
         maskName,
+        maskHasAlpha,
         positive: prompt,
         negative: typeof body.negativePrompt === "string" ? body.negativePrompt : undefined,
         width: typeof body.width === "number" ? body.width : undefined,
