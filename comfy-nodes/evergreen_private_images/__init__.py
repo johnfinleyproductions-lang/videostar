@@ -245,11 +245,19 @@ def ready_assets(operation=None):
             return False
         try:
             choices = loader.INPUT_TYPES()["required"]["unet_name"][0]
+            # A preallocated/sparse interrupted download can have the correct
+            # name and size while containing no model. Do not advertise it.
+            model_path = folder_paths.get_full_path("unet", "qwen-image-edit-2511-Q6_K.gguf")
+            if model_path is None:
+                return False
+            with open(model_path, "rb") as model_file:
+                if model_file.read(8) != b"GGUF\x03\x00\x00\x00":
+                    return False
             return ("qwen-image-edit-2511-Q6_K.gguf" in choices
                 and "qwen_2.5_vl_7b_fp8_scaled.safetensors" in folder_paths.get_filename_list("text_encoders")
                 and "qwen_image_vae.safetensors" in folder_paths.get_filename_list("vae")
                 and all(name in nodes.NODE_CLASS_MAPPINGS for name in ["TextEncodeQwenImageEditPlus", "CFGNorm"]))
-        except (AttributeError, KeyError, TypeError, ValueError):
+        except (AttributeError, KeyError, TypeError, ValueError, OSError):
             return False
     required = {"diffusion_models": "qwen_image_edit_2509_fp8_e4m3fn.safetensors",
         "text_encoders": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "vae": "qwen_image_vae.safetensors"}

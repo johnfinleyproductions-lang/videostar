@@ -59,7 +59,10 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
         assets = {"diffusion_models": "qwen_image_edit_2509_fp8_e4m3fn.safetensors",
             "text_encoders": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "vae": "qwen_image_vae.safetensors",
             "checkpoints": "sam3.1_multiplex_fp16.safetensors"}
+        self.gguf = self.base / "qwen-image-edit-2511-Q6_K.gguf"
+        self.gguf.write_bytes(b"GGUF\x03\x00\x00\x00")
         mod("folder_paths", get_filename_list=lambda folder: [assets[folder]],
+            get_full_path=lambda folder, name: str(self.gguf),
             get_input_directory=lambda: str(self.base / "public-input"), get_output_directory=lambda: str(self.base / "public-output"))
         mod("nodes", NODE_CLASS_MAPPINGS={"TextEncodeQwenImageEditPlus": SimpleNamespace(INPUT_TYPES=lambda: {"optional": {"image2": ("IMAGE",), "image3": ("IMAGE",)}})},
             KSampler=SimpleNamespace(INPUT_TYPES=lambda: {"required": {}}))
@@ -173,6 +176,19 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
         capabilities = await (await self.client.get(base, headers=self.auth)).json()
         self.assertFalse(capabilities["viewpoints"]["ready"])
         self.assertEqual((await self.client.post(base, headers=self.auth, json={**payload, "id":str(uuid.uuid4())})).status, 503)
+
+    async def test_sparse_truncated_or_missing_viewpoint_asset_is_unavailable(self):
+        base = "/evergreen-private/images"
+        payload = {**{k:v for k,v in self.payload.items() if k != "reference"}, "operation":"viewpoint"}
+        for contents in [b"\x00" * 32, b"GGUF", b"GGUF\xff\x00\x00\x00"]:
+            self.gguf.write_bytes(contents)
+            capabilities = await (await self.client.get(base, headers=self.auth)).json()
+            self.assertFalse(capabilities["viewpoints"]["ready"])
+            self.assertTrue(capabilities["selections"]["ready"])
+            self.assertEqual((await self.client.post(base, headers=self.auth, json=payload)).status,503)
+        self.gguf.unlink()
+        self.assertFalse((await (await self.client.get(base, headers=self.auth)).json())["viewpoints"]["ready"])
+        self.assertEqual(len(self.queued),0)
 
     async def test_selection_authenticated_queued_geometry_and_ack(self):
         selection = "/evergreen-private/selections"
