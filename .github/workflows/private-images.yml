@@ -20,8 +20,9 @@ jobs:
         with:
           python-version: '3.12'
       - run: npm ci
-      - run: python -m pip install cryptography aiohttp pillow numpy
+      - run: python -m pip install cryptography aiohttp pillow numpy opencv-python-headless
       - run: node scripts/comfy-auth.test.mjs
       - run: node scripts/qwen-two-image.test.mjs
       - run: python scripts/test-private-images.py
       - run: python scripts/test-private-image-http.py
+      - run: python scripts/test-private-selections.py

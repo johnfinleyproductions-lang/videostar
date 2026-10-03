@@ -6,6 +6,54 @@ Comfy modality remains the model runtime.
 
 ## Release state
 
+### October 3 expansion plan
+
+- [x] Preserve legacy image identities while adding an encrypted third input.
+- [x] Add queued, signed SAM3.1 selections with bounded reviewed contours.
+- [x] Add an explicit experimental Qwen 2511 viewpoint operation; no angle LoRA claim.
+- [x] Cover authentication, input identity, contours, crash recovery and cleanup.
+- [ ] Validate on the installed runtime before enabling the corresponding Core UI.
+
+The read-only serving inventory confirms native SAM3 detection, its existing
+`sam3.1_multiplex_fp16.safetensors` checkpoint, Qwen 2511 Q6 GGUF, and three image
+conditioning inputs. It does not establish output quality. Qwen layered weights
+and angle LoRA are absent. Installed Qwen 2.1 remains excluded: its research
+license requires a separate commercial license for commercial use. This change
+does not install dependencies, download models, or modify Windows startup.
+
+### Expansion protocol
+
+The protocol remains `evergreen-private-images-v1`. Existing image jobs retain
+their exact request hash and graph when new fields are absent. Capabilities add
+`threeImages`, `maxReferences`, `selections: {ready, model: "sam3.1"}`,
+`viewpoints: {ready, model: "qwen-image-edit-2511-q6"}`, and `layers: {ready:false}`.
+
+- `POST /evergreen-private/images` accepts optional `reference2` (requiring
+  `reference`) or single-source `operation: "viewpoint"`. The latter selects the
+  installed Qwen 2511 Q6 GGUF with the existing text encoder/VAE and 20-step
+  graph. It uses ordinary instructions, not a trained camera-angle adapter.
+- `POST /evergreen-private/selections` accepts `{id, source, query, width, height}`.
+  Source is a canonical PNG in the existing 768–1536/32 working dimensions.
+  Query is one short description (1–120 characters), without comma, colon,
+  parentheses or newlines. The private instruction node supplies the native
+  SAM3 tokenizer's `:12` detection bound. Model work runs through the same
+  signed private queue; no GPU work runs in a route thread.
+- Both return `{prompt_id}`. Status/output/ack/DELETE use the existing
+  `/evergreen-private/images/{id}` paths. Completed status adds `contentType`;
+  selection output is `application/json`, image output remains `image/png`.
+- Geometry output is `{version:1,width,height,query,approximate:true,suggestions}`.
+  Each suggestion has `{id,label,score,shapes}`; there are at most 12 suggestions,
+  each with at most 12 ordered outline shapes and 128 normalized points per
+  shape. Holes subtract; nested islands add. Empty or overly fragmented instances
+  are omitted. These are editable, approximate suggestions requiring review;
+  they are not hair-level alpha mattes or exact original masks.
+
+Operation and third input are included in request identity only when present.
+Selection JSON is encrypted, digest-bound, crash-recoverable and erased with
+the same lifecycle as image output. Queries and coordinates are absent from
+Comfy graph history and public outputs. The existing CPU OpenCV installation
+performs contour extraction after the model has completed.
+
 Local storage/runtime tests and synthetic HTTP tests pass. Core production gates
 remain closed until installation, ordinary-client regression checks, real model
 visual acceptance, and release/deployment checks pass. Tests never use personal
@@ -76,7 +124,7 @@ ancestors, outside Comfy input/output. Preserve the key across restarts so saved
 encrypted outputs can be recovered. Never commit or print the credential.
 
 Install this entire directory under the serving Comfy `custom_nodes` folder.
-`cryptography`, Pillow, numpy, torch and aiohttp must be available in that exact
+`cryptography`, Pillow, numpy, torch, OpenCV and aiohttp must be available in that exact
 runtime. The verified worker environment already supplies them; do not replace
 its GPU dependency stack. Stage the tracked plugin, check queue/tenant state,
 then use the established Comfy restart procedure.
@@ -101,8 +149,11 @@ From the VideoStar checkout, with the installed runtime's dependencies:
 - `python scripts/test-private-images.py` — storage, erasure, crashes, expiry,
   graph signing, failure sanitization and cache release.
 - `python scripts/test-private-image-http.py` — actual authenticated HTTP,
-  repeated admission, signed two-image graph, disabled sampler callbacks,
-  output digest acknowledgement, erasure and reserved websocket denial.
+  repeated admission, signed three-image/selection/viewpoint graphs, disabled
+  sampler callbacks, output digest acknowledgement, erasure and reserved
+  websocket denial.
+- `python scripts/test-private-selections.py` — separate instances, holes,
+  nested islands, bounded vertices and refusal of invalid/overcomplex masks.
 - `node scripts/comfy-auth.test.mjs` — scoped server credentials, redirect
   refusal, private history filtering and unavailable-key behavior.
 - `node scripts/qwen-two-image.test.mjs` — existing ordinary Qwen graphs.

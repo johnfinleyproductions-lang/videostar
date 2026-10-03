@@ -21,13 +21,14 @@ import execution
 import folder_paths
 import nodes
 from server import PromptServer
-from .store import PrivateJobs, job_id
+from .store import PrivateJobs, canonical, job_id
 from .runtime import install_runtime_boundary
+from .selections import describe_masks
 
 KEY_FILE = os.environ.get("EVERGREEN_PRIVATE_IMAGE_KEY_FILE")
 ROOT = os.environ.get("EVERGREEN_PRIVATE_IMAGE_ROOT")
 JOBS = None
-MAX_BODY = 58 * 1024 * 1024
+MAX_BODY = 86 * 1024 * 1024
 PROTOCOL = "evergreen-private-images-v1"
 
 
@@ -40,7 +41,7 @@ def verify(identity, authorization, prompt):
 class PrivateImage:
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {"identity": ("STRING",), "slot": (["source", "reference"],), "authorization": ("STRING",)}, "hidden": {"prompt": "PROMPT"}}
+        return {"required": {"identity": ("STRING",), "slot": (["source", "reference", "reference2"],), "authorization": ("STRING",)}, "hidden": {"prompt": "PROMPT"}}
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
@@ -52,11 +53,13 @@ class PrivateImage:
     CATEGORY = "Evergreen/private"
 
     def load(self, identity, slot, authorization, prompt):
-        verify(identity, authorization, prompt)
+        manifest = verify(identity, authorization, prompt)
         contents = JOBS.read_blob(identity, slot)
         with Image.open(io.BytesIO(contents)) as image:
             if image.format != "PNG" or getattr(image, "n_frames", 1) != 1 or image.width * image.height > 2_500_000:
                 raise ValueError("Invalid canonical private input")
+            if slot == "source" and (image.width != manifest["width"] or image.height != manifest["height"]):
+                raise ValueError("Source dimensions do not match the pinned request")
             pixels = np.array(image.convert("RGB"), dtype=np.float32) / 255.0
         return (torch.from_numpy(pixels)[None, ...],)
 
@@ -75,8 +78,11 @@ class PrivateInstruction:
     CATEGORY = "Evergreen/private"
 
     def load(self, identity, authorization, prompt):
-        verify(identity, authorization, prompt)
-        return (JOBS.read_blob(identity, "instruction").decode(),)
+        manifest = verify(identity, authorization, prompt)
+        text = JOBS.read_blob(identity, "instruction").decode()
+        # Native SAM3 defaults to one instance. Keep its category/count syntax
+        # server-owned; the request validator admits a single short description.
+        return (text + ":12" if manifest.get("operation") == "selection" else text,)
 
 
 class PrivateSampler:
@@ -128,6 +134,8 @@ class PrivateOutput:
 
     def save(self, images, identity, authorization, prompt):
         manifest = verify(identity, authorization, prompt)
+        if manifest.get("operation") == "selection":
+            raise ValueError("Selections require private geometry output")
         if len(images) != 1 or images.shape[2] != manifest["width"] or images.shape[1] != manifest["height"]:
             raise ValueError("Private output dimensions changed")
         pixels = np.clip(images[0].cpu().numpy() * 255.0, 0, 255).astype(np.uint8)
@@ -138,13 +146,54 @@ class PrivateOutput:
         return {"ui": {"private_receipt": [identity]}}
 
 
+class PrivateSelectionOutput:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"masks": ("MASK",), "bboxes": ("BOUNDING_BOX",), "identity": ("STRING",),
+            "authorization": ("STRING",)}, "hidden": {"prompt": "PROMPT"}}
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+    FUNCTION = "save"
+    CATEGORY = "Evergreen/private"
+
+    def save(self, masks, bboxes, identity, authorization, prompt):
+        manifest = verify(identity, authorization, prompt)
+        if manifest.get("operation") != "selection":
+            raise ValueError("Geometry output requires a selection job")
+        if len(bboxes) != 1 or not isinstance(bboxes[0], list):
+            raise ValueError("Invalid selection instances")
+        data = describe_masks(masks.detach().cpu().numpy(), bboxes[0],
+            JOBS.read_blob(identity, "instruction").decode(), manifest["width"], manifest["height"])
+        encoded = canonical(data)
+        if len(encoded) > 1024 * 1024:
+            raise ValueError("Private geometry exceeds its bound")
+        JOBS.complete(identity, encoded)
+        return {"ui": {"private_receipt": [identity]}}
+
+
 NODE_CLASS_MAPPINGS = {"EvergreenPrivateImage": PrivateImage, "EvergreenPrivateInstruction": PrivateInstruction,
-    "EvergreenPrivateSampler": PrivateSampler, "EvergreenPrivateOutput": PrivateOutput}
+    "EvergreenPrivateSampler": PrivateSampler, "EvergreenPrivateOutput": PrivateOutput,
+    "EvergreenPrivateSelectionOutput": PrivateSelectionOutput}
 
 
 def build_graph(manifest):
     identity = manifest["id"]
     private = {"identity": identity, "authorization": ""}
+    if manifest.get("operation") == "selection":
+        return {
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "sam3.1_multiplex_fp16.safetensors"}},
+            "4": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["1", 1], "text": ["13", 0]}},
+            "7": {"class_type": "SAM3_Detect", "inputs": {"model": ["1", 0], "image": ["10", 0],
+                "conditioning": ["4", 0], "threshold": 0.5, "refine_iterations": 2, "individual_masks": True}},
+            "9": {"class_type": "EvergreenPrivateSelectionOutput", "inputs": {**private, "masks": ["7", 0], "bboxes": ["7", 1]}},
+            "10": {"class_type": "EvergreenPrivateImage", "inputs": {**private, "slot": "source"}},
+            "13": {"class_type": "EvergreenPrivateInstruction", "inputs": private.copy()},
+        }
     graph = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "qwen_image_edit_2509_fp8_e4m3fn.safetensors", "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "type": "qwen_image", "device": "cpu"}},
@@ -166,21 +215,42 @@ def build_graph(manifest):
         graph["11"] = {"class_type": "EvergreenPrivateImage", "inputs": {**private, "slot": "reference"}}
         graph["4"]["inputs"]["image2"] = ["11", 0]
         graph["5"]["inputs"]["image2"] = ["11", 0]
+    if manifest.get("reference2"):
+        graph["15"] = {"class_type": "EvergreenPrivateImage", "inputs": {**private, "slot": "reference2"}}
+        graph["4"]["inputs"]["image3"] = ["15", 0]
+        graph["5"]["inputs"]["image3"] = ["15", 0]
+    if manifest.get("operation") == "viewpoint":
+        graph["1"] = {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": "qwen-image-edit-2511-Q6_K.gguf"}}
     return graph
 
 
-def supports_reference():
+def supports_reference(slot="image2"):
     encoder = nodes.NODE_CLASS_MAPPINGS.get("TextEncodeQwenImageEditPlus")
     if encoder is None:
         return False
     try:
         inputs = encoder.INPUT_TYPES()
-        return "image2" in {**inputs.get("required", {}), **inputs.get("optional", {})}
+        return slot in {**inputs.get("required", {}), **inputs.get("optional", {})}
     except (AttributeError, TypeError, ValueError):
         return False
 
 
-def ready_assets():
+def ready_assets(operation=None):
+    if operation == "selection":
+        return ("sam3.1_multiplex_fp16.safetensors" in folder_paths.get_filename_list("checkpoints")
+            and all(name in nodes.NODE_CLASS_MAPPINGS for name in ["SAM3_Detect", "CheckpointLoaderSimple", "CLIPTextEncode"]))
+    if operation == "viewpoint":
+        loader = nodes.NODE_CLASS_MAPPINGS.get("UnetLoaderGGUF")
+        if loader is None:
+            return False
+        try:
+            choices = loader.INPUT_TYPES()["required"]["unet_name"][0]
+            return ("qwen-image-edit-2511-Q6_K.gguf" in choices
+                and "qwen_2.5_vl_7b_fp8_scaled.safetensors" in folder_paths.get_filename_list("text_encoders")
+                and "qwen_image_vae.safetensors" in folder_paths.get_filename_list("vae")
+                and all(name in nodes.NODE_CLASS_MAPPINGS for name in ["TextEncodeQwenImageEditPlus", "CFGNorm"]))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return False
     required = {"diffusion_models": "qwen_image_edit_2509_fp8_e4m3fn.safetensors",
         "text_encoders": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "vae": "qwen_image_vae.safetensors"}
     return (all(name in folder_paths.get_filename_list(folder) for folder, name in required.items())
@@ -214,28 +284,49 @@ def start_routes(jobs):
     @routes.get("/evergreen-private/images")
     async def capabilities(request):
         return web.json_response({"protocol": PROTOCOL, "ok": ready_assets(), "twoImages": supports_reference(), "steps": 20,
-            "encryptedStorage": True, "noPublicPreviews": True}, headers=headers)
+            "encryptedStorage": True, "noPublicPreviews": True,
+            "threeImages": supports_reference("image3"), "maxReferences": 2 if supports_reference("image3") else (1 if supports_reference() else 0),
+            "selections": {"ready": ready_assets("selection"), "model": "sam3.1"},
+            "viewpoints": {"ready": ready_assets("viewpoint"), "model": "qwen-image-edit-2511-q6"},
+            "layers": {"ready": False}}, headers=headers)
 
     @routes.post("/evergreen-private/images")
     async def create(request):
-        if not ready_assets():
-            return web.json_response({"error": "Pinned image model unavailable"}, status=503, headers=headers)
-        if request.content_length and request.content_length > MAX_BODY:
+        return await create_job(request, selection=False)
+
+    @routes.post("/evergreen-private/selections")
+    async def create_selection(request):
+        return await create_job(request, selection=True)
+
+    async def create_job(request, selection):
+        max_body = 29 * 1024 * 1024 if selection else MAX_BODY
+        if request.content_length and request.content_length > max_body:
             return web.json_response({"error": "Image payload too large"}, status=413, headers=headers)
         payload = bytearray()
         try:
             async for chunk in request.content.iter_chunked(64 * 1024):
                 payload.extend(chunk)
-                if len(payload) > MAX_BODY:
+                if len(payload) > max_body:
                     return web.json_response({"error": "Image payload too large"}, status=413, headers=headers)
             body = json.loads(payload)
-            if set(body) - {"id", "source", "reference", "instruction", "seed", "width", "height"}:
+            allowed = {"id", "source", "query", "width", "height"} if selection else {
+                "id", "source", "reference", "reference2", "instruction", "seed", "width", "height", "operation"}
+            if not isinstance(body, dict) or set(body) - allowed:
                 raise ValueError("Unexpected private job fields")
+            operation = "selection" if selection else body.get("operation")
+            if not selection and operation not in {None, "viewpoint"}:
+                raise ValueError("Invalid image operation")
+            if not ready_assets(operation):
+                return web.json_response({"error": "Pinned private model unavailable"}, status=503, headers=headers)
             if body.get("reference") and not supports_reference():
                 return web.json_response({"error": "Second image input unavailable"}, status=503, headers=headers)
+            if body.get("reference2") and not supports_reference("image3"):
+                return web.json_response({"error": "Third image input unavailable"}, status=503, headers=headers)
             source = base64.b64decode(body["source"], validate=True)
             reference = base64.b64decode(body["reference"], validate=True) if body.get("reference") else None
-            manifest, fresh = jobs.reserve(body["id"], source, reference, body["instruction"], body["seed"], body["width"], body["height"])
+            reference2 = base64.b64decode(body["reference2"], validate=True) if body.get("reference2") else None
+            manifest, fresh = jobs.reserve(body["id"], source, reference, body["query"] if selection else body["instruction"],
+                0 if selection else body["seed"], body["width"], body["height"], reference2=reference2, operation=operation)
             if fresh:
                 graph = build_graph(manifest)
                 # Validate without logging private inputs or instructions.
@@ -269,7 +360,8 @@ def start_routes(jobs):
             if state == "consumed":
                 return web.json_response({"status": "consumed"}, headers=headers)
             if state == "completed":
-                return web.json_response({"status": "completed", "sha256": manifest["outputSha256"]}, headers=headers)
+                return web.json_response({"status": "completed", "sha256": manifest["outputSha256"],
+                    "contentType": "application/json" if manifest.get("operation") == "selection" else "image/png"}, headers=headers)
             return web.json_response({"status": "processing" if state in {"reserved", "processing"} else "failed"}, headers=headers)
         except (ValueError, KeyError):
             return web.json_response({"status": "failed"}, headers=headers)
@@ -278,9 +370,11 @@ def start_routes(jobs):
     async def output(request):
         try:
             identity = job_id(request.match_info["identity"])
-            if jobs.status(identity)["state"] != "completed":
+            manifest = jobs.status(identity)
+            if manifest["state"] != "completed":
                 raise KeyError("Output unavailable")
-            return web.Response(body=jobs.read_blob(identity, "output"), content_type="image/png", headers=headers)
+            return web.Response(body=jobs.read_blob(identity, "output"),
+                content_type="application/json" if manifest.get("operation") == "selection" else "image/png", headers=headers)
         except (ValueError, KeyError, FileNotFoundError):
             return web.json_response({"error": "Private output unavailable"}, status=404, headers=headers)
 

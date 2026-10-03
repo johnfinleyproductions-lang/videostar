@@ -57,12 +57,17 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
         mod("execution", validate_prompt=validate, PromptExecutor=Executor)
         mod("server", PromptServer=SimpleNamespace(instance=server))
         assets = {"diffusion_models": "qwen_image_edit_2509_fp8_e4m3fn.safetensors",
-            "text_encoders": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "vae": "qwen_image_vae.safetensors"}
+            "text_encoders": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "vae": "qwen_image_vae.safetensors",
+            "checkpoints": "sam3.1_multiplex_fp16.safetensors"}
         mod("folder_paths", get_filename_list=lambda folder: [assets[folder]],
             get_input_directory=lambda: str(self.base / "public-input"), get_output_directory=lambda: str(self.base / "public-output"))
-        mod("nodes", NODE_CLASS_MAPPINGS={"TextEncodeQwenImageEditPlus": SimpleNamespace(INPUT_TYPES=lambda: {"optional": {"image2": ("IMAGE",)}})},
+        mod("nodes", NODE_CLASS_MAPPINGS={"TextEncodeQwenImageEditPlus": SimpleNamespace(INPUT_TYPES=lambda: {"optional": {"image2": ("IMAGE",), "image3": ("IMAGE",)}})},
             KSampler=SimpleNamespace(INPUT_TYPES=lambda: {"required": {}}))
         sys.modules["nodes"].NODE_CLASS_MAPPINGS["CFGNorm"] = object()
+        for name in ["SAM3_Detect", "CheckpointLoaderSimple", "CLIPTextEncode"]:
+            sys.modules["nodes"].NODE_CLASS_MAPPINGS[name] = object()
+        sys.modules["nodes"].NODE_CLASS_MAPPINGS["UnetLoaderGGUF"] = SimpleNamespace(INPUT_TYPES=lambda: {
+            "required": {"unet_name": (["qwen-image-edit-2511-Q6_K.gguf"],)}})
         os.environ.pop("EVERGREEN_PRIVATE_IMAGE_KEY_FILE", None)
         os.environ.pop("EVERGREEN_PRIVATE_IMAGE_ROOT", None)
         package = Path(__file__).resolve().parents[1] / "comfy-nodes/evergreen_private_images"
@@ -133,6 +138,87 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(capabilities["ok"])
         self.assertFalse(capabilities["twoImages"])
         self.assertEqual((await self.client.post(base, headers=self.auth, json=self.payload)).status, 503)
+        self.assertFalse(self.queued)
+
+    async def test_three_images_are_encrypted_conditioned_and_identity_bound(self):
+        base = "/evergreen-private/images"
+        capabilities = await (await self.client.get(base, headers=self.auth)).json()
+        self.assertTrue(capabilities["threeImages"])
+        self.assertEqual(capabilities["maxReferences"], 2)
+        payload = {**self.payload, "reference2": self.payload["source"]}
+        response = await self.client.post(base, headers=self.auth, json=payload)
+        self.assertEqual(response.status, 200)
+        graph = self.queued[0][2]
+        for node in ["4", "5"]:
+            self.assertEqual(graph[node]["inputs"]["image3"], ["15", 0])
+        self.assertEqual(graph["15"]["inputs"]["slot"], "reference2")
+        self.assertEqual(self.plugin.JOBS.read_blob(self.id, "reference2"), self.png)
+        self.assertEqual((await self.client.post(base, headers=self.auth, json=self.payload)).status, 400)
+        self.assertEqual((await self.client.post(base, headers=self.auth, json=payload)).status, 200)
+        self.assertEqual(len(self.queued), 1)
+
+    async def test_third_input_fail_closed_and_viewpoint_uses_only_pinned_2511(self):
+        base = "/evergreen-private/images"
+        encoder = sys.modules["nodes"].NODE_CLASS_MAPPINGS["TextEncodeQwenImageEditPlus"]
+        sys.modules["nodes"].NODE_CLASS_MAPPINGS["TextEncodeQwenImageEditPlus"] = SimpleNamespace(INPUT_TYPES=lambda: {"optional": {"image2": ("IMAGE",)}})
+        self.assertEqual((await self.client.post(base, headers=self.auth, json={**self.payload, "reference2": self.payload["source"]})).status, 503)
+        sys.modules["nodes"].NODE_CLASS_MAPPINGS["TextEncodeQwenImageEditPlus"] = encoder
+        payload = {**{k: v for k, v in self.payload.items() if k != "reference"}, "operation": "viewpoint"}
+        self.assertEqual((await self.client.post(base, headers=self.auth, json=payload)).status, 200)
+        graph = self.queued[0][2]
+        self.assertEqual(graph["1"], {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": "qwen-image-edit-2511-Q6_K.gguf"}})
+        self.assertFalse(any("Lora" in n["class_type"] for n in graph.values()))
+        self.assertEqual((await self.client.post(base, headers=self.auth, json={k:v for k,v in payload.items() if k != "operation"})).status, 400)
+        sys.modules["nodes"].NODE_CLASS_MAPPINGS.pop("UnetLoaderGGUF")
+        capabilities = await (await self.client.get(base, headers=self.auth)).json()
+        self.assertFalse(capabilities["viewpoints"]["ready"])
+        self.assertEqual((await self.client.post(base, headers=self.auth, json={**payload, "id":str(uuid.uuid4())})).status, 503)
+
+    async def test_selection_authenticated_queued_geometry_and_ack(self):
+        selection = "/evergreen-private/selections"
+        base = "/evergreen-private/images/" + self.id
+        payload = {"id": self.id, "source": self.payload["source"], "width":768, "height":768, "query":"person"}
+        self.assertEqual((await self.client.post(selection, json=payload)).status, 401)
+        for _ in range(2):
+            self.assertEqual((await self.client.post(selection, headers=self.auth, json=payload)).status, 200)
+        self.assertEqual(len(self.queued), 1)
+        graph = self.queued[0][2]
+        self.assertNotIn("person", json.dumps(graph))
+        self.assertEqual(graph["1"]["inputs"]["ckpt_name"], "sam3.1_multiplex_fp16.safetensors")
+        self.assertEqual(graph["7"]["class_type"], "SAM3_Detect")
+        self.assertTrue(graph["7"]["inputs"]["individual_masks"])
+        tag = graph["13"]["inputs"]["authorization"]
+        self.assertEqual(self.plugin.PrivateInstruction().load(self.id, tag, graph)[0], "person:12")
+        mask = np.zeros((1,768,768), np.float32)
+        mask[0,100:500,100:500] = 1
+        mask[0,200:300,200:300] = 0
+        tensor = SimpleNamespace(detach=lambda: SimpleNamespace(cpu=lambda: SimpleNamespace(numpy=lambda: mask)))
+        self.plugin.PrivateSelectionOutput().save(tensor, [[{"score":0.9}]], self.id, tag, graph)
+        status = await (await self.client.get(base, headers=self.auth)).json()
+        self.assertEqual(status["contentType"], "application/json")
+        response = await self.client.get(base + "/output", headers=self.auth)
+        self.assertEqual(response.content_type, "application/json")
+        raw = await response.read()
+        data = json.loads(raw)
+        self.assertTrue(data["approximate"])
+        self.assertEqual(data["query"], "person")
+        shapes = data["suggestions"][0]["shapes"]
+        self.assertEqual([shape["operation"] for shape in shapes], ["add", "subtract"])
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), status["sha256"])
+        self.assertEqual((await self.client.post(base + "/ack", headers=self.auth, json={"sha256":status["sha256"]})).status, 200)
+        self.assertEqual((await self.client.get(base + "/output", headers=self.auth)).status, 404)
+        self.assertFalse(list((self.base / "jobs").rglob("*.sealed")))
+
+    async def test_selection_category_limits_and_model_readiness(self):
+        path = "/evergreen-private/selections"
+        payload = {"id": self.id, "source": self.payload["source"], "width":768, "height":768, "query":"person"}
+        for query in ["", "person:100000", "person,cup", "a"*121]:
+            self.assertEqual((await self.client.post(path, headers=self.auth, json={**payload,"query":query})).status, 400)
+        self.assertEqual((await self.client.post(path, headers=self.auth, json={**payload,"reference":self.payload["source"]})).status, 400)
+        sys.modules["nodes"].NODE_CLASS_MAPPINGS.pop("SAM3_Detect")
+        capabilities = await (await self.client.get("/evergreen-private/images", headers=self.auth)).json()
+        self.assertFalse(capabilities["selections"]["ready"])
+        self.assertEqual((await self.client.post(path, headers=self.auth, json=payload)).status, 503)
         self.assertFalse(self.queued)
 
     async def test_single_image_has_matching_visual_conditioning(self):

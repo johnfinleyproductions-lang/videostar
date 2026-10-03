@@ -1,5 +1,6 @@
 """No GPU, real photos or Comfy install needed for storage lifecycle tests."""
 import copy
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
@@ -65,6 +66,47 @@ class PrivateJobTests(unittest.TestCase):
         self.assertFalse(self.reserve()[1])
         with self.assertRaises(ValueError):
             self.reserve(seed=11)
+
+    def test_legacy_identity_and_optional_third_input(self):
+        manifest, _ = self.reserve()
+        old_request = {"source": hashlib.sha256(self.source).hexdigest(), "reference": hashlib.sha256(self.source).hexdigest(),
+            "instruction": self.instruction, "seed": 10, "width": 768, "height": 768}
+        self.assertEqual(manifest["requestHash"], hashlib.sha256(module.canonical(old_request)).hexdigest())
+        self.assertNotIn("operation", manifest)
+        self.assertNotIn("reference2", manifest)
+        with self.assertRaises(ValueError):
+            self.reserve(reference2=self.source)
+        identity = str(uuid.uuid4())
+        self.reserve(identity=identity, reference2=self.source)
+        self.assertEqual(self.store.read_blob(identity, "reference2"), self.source)
+        with self.assertRaises(ValueError):
+            self.reserve(identity=identity, reference2=self.source + b"changed")
+        self.store.erase(identity)
+        self.assertFalse(list((self.base / "jobs" / identity).glob("*.sealed")))
+
+    def test_operation_identity_and_single_category_query(self):
+        manifest, _ = self.reserve(reference=None, operation="selection", instruction="person")
+        self.assertEqual(manifest["operation"], "selection")
+        for change in [dict(operation=None, instruction="A person in view"), dict(instruction="cup"), dict(operation="viewpoint")]:
+            with self.assertRaises(ValueError):
+                self.reserve(reference=None, **change)
+        for query in ["", " ", "a" * 121, "person:999999", "cup,person", "person\ncar"]:
+            with self.assertRaises(ValueError):
+                self.reserve(identity=str(uuid.uuid4()), reference=None, instruction=query, operation="selection")
+        for change in [dict(reference=None, reference2=self.source), dict(operation="other"), dict(operation="selection"), dict(operation="viewpoint")]:
+            with self.assertRaises(ValueError):
+                self.reserve(identity=str(uuid.uuid4()), **change)
+
+    def test_selection_json_is_encrypted_recoverable_and_removed_on_ack(self):
+        self.reserve(reference=None, instruction="person", operation="selection")
+        self.store.authorize_graph(self.identity, self.graph)
+        data = module.canonical({"version": 1, "query": "person", "suggestions": []})
+        self.store.complete(self.identity, data)
+        restarted = module.PrivateJobs(self.base / "jobs", self.key, lambda: self.now[0])
+        self.assertEqual(restarted.read_blob(self.identity, "output"), data)
+        self.assertNotIn(data, (self.base / "jobs" / self.identity / "output.sealed").read_bytes())
+        restarted.acknowledge(self.identity, hashlib.sha256(data).hexdigest())
+        self.assertFalse(list((self.base / "jobs" / self.identity).glob("*.sealed")))
 
     def test_whole_graph_is_pinned_against_read_or_output_redirection(self):
         tag = self.active()
