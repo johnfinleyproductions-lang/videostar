@@ -158,6 +158,7 @@ class PrivateJobTests(unittest.TestCase):
         self.store._write_blob(self.identity, "output", self.source)
         restarted = module.PrivateJobs(self.base / "jobs", self.key, lambda: self.now[0])
         self.assertEqual(restarted.status(self.identity)["state"], "failed")
+        self.assertNotIn("progress", restarted.status(self.identity))
         self.assertFalse(list((self.base / "jobs" / self.identity).glob("*.sealed")))
 
     def test_expiry_and_crash_leftovers_are_scrubbed(self):
@@ -204,7 +205,7 @@ class PrivateJobTests(unittest.TestCase):
             module.PrivateJobs(self.base / "linked", self.key)
 
     def test_runtime_releases_private_cache_preserves_failure_and_hides_events(self):
-        sent, errors = [], []
+        sent, errors, starts = [], [], []
         server = SimpleNamespace(client_id=None, send_sync=lambda *args: sent.append(args))
 
         class Executor:
@@ -227,7 +228,7 @@ class PrivateJobTests(unittest.TestCase):
             def handle_execution_error(self, *args):
                 errors.append(args[-2])
 
-        runtime.install_runtime_boundary(server, Executor)
+        runtime.install_runtime_boundary(server, Executor, lambda graph: starts.append(graph))
         self_test = self
         executor = Executor()
         executor.caches = {"pixels": b"stale cached pixels"}
@@ -239,6 +240,7 @@ class PrivateJobTests(unittest.TestCase):
         self.assertEqual(executor.status_messages, ["failure preserved"])
         self.assertEqual(executor.caches, {})
         self.assertEqual(sent, [])
+        self.assertEqual(len(starts), 1)
         self.assertEqual(errors[0]["current_inputs"], {})
         self.assertEqual(errors[0]["traceback"], [])
         self.assertNotIn("private instruction", errors[0]["exception_message"])
@@ -246,6 +248,26 @@ class PrivateJobTests(unittest.TestCase):
         executor.execute(ordinary, self.identity, {"client_id": "ordinary-client"}, [])
         self.assertTrue(executor.caches)
         self.assertEqual(len(sent), 1)
+        self.assertEqual(len(starts), 1)
+
+    def test_scalar_progress_is_monotonic_bounded_and_erased_with_job(self):
+        self.reserve()
+        self.store.authorize_graph(self.identity, self.graph)
+        self.assertEqual(self.store.status(self.identity)["progress"], {"phase": "queued"})
+        self.store.progress(self.identity, "preparing")
+        self.store.progress(self.identity, "sampling", 4, 20)
+        self.store.progress(self.identity, "sampling", 2, 20)
+        self.store.progress(self.identity, "preparing")
+        self.assertEqual(self.store.status(self.identity)["progress"], {"phase": "sampling", "completedSteps": 4, "totalSteps": 20})
+        for args in [("unknown",), ("sampling", -1, 20), ("sampling", 21, 20), ("sampling", True, 20),
+                     ("sampling", 1, 21), ("sampling", 1.5, 20), ("queued", 1, 20)]:
+            with self.assertRaises(ValueError):
+                self.store.progress(self.identity, *args)
+        self.store.progress(self.identity, "finishing")
+        self.assertEqual(self.store.status(self.identity)["progress"], {"phase": "finishing"})
+        self.store.erase(self.identity, "expired")
+        self.store.progress(self.identity, "sampling", 10, 20)
+        self.assertNotIn("progress", self.store.status(self.identity))
 
 
 if __name__ == "__main__":

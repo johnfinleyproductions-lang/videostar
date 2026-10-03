@@ -29,9 +29,11 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
         self.auth = {"Authorization": "Bearer " + "ab" * 32}
         self.queued = []
         self.sample_calls = []
+        self.progress_samples = []
+        self.public_events = []
         app = web.Application()
         server = SimpleNamespace(app=app, routes=web.RouteTableDef(), number=0, client_id=None,
-            send_sync=lambda *args: None, prompt_queue=SimpleNamespace(put=self.queued.append, get_history=lambda **kwargs: {}))
+            send_sync=lambda *args: self.public_events.append(args), prompt_queue=SimpleNamespace(put=self.queued.append, get_history=lambda **kwargs: {}))
 
         class Executor:
             def execute(self, *args):
@@ -50,8 +52,15 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
             sys.modules[name] = result
             return result
 
+        def synthetic_sample(*args, **kw):
+            self.sample_calls.append(kw)
+            for step in range(20):
+                kw["callback"](step, object(), object(), 20)
+                self.progress_samples.append(self.plugin.JOBS.status(self.id)["progress"])
+            return np.zeros((1, 4, 8, 8))
+
         sample = mod("comfy.sample", fix_empty_latent_channels=lambda model, latent, *args: latent,
-            prepare_noise=lambda *args: "noise", sample=lambda *args, **kw: self.sample_calls.append(kw) or np.zeros((1, 4, 8, 8)))
+            prepare_noise=lambda *args: "noise", sample=synthetic_sample)
         mod("comfy", sample=sample)
         mod("torch", from_numpy=lambda data: data)
         mod("execution", validate_prompt=validate, PromptExecutor=Executor)
@@ -109,6 +118,9 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 200)
             self.assertEqual((await response.json())["prompt_id"], self.id)
         self.assertEqual(len(self.queued), 1)
+        pending = await (await self.client.get(base + "/" + self.id, headers=self.auth)).json()
+        self.assertEqual(pending, {"status": "processing", "progress": {"phase": "queued"}})
+        self.assertEqual((await self.client.get(base + "/" + self.id)).status, 401)
         graph = self.queued[0][2]
         self.assertEqual(self.queued[0][3]["client_id"], "evergreen-private:" + self.id)
         self.assertEqual(graph["4"]["inputs"]["image2"], ["11", 0])
@@ -122,11 +134,18 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.PrivateInstruction().load(self.id, authorization, graph)[0], self.payload["instruction"])
         self.plugin.PrivateSampler().sample(self.id, authorization, graph, object(), 42, 20, 2.5,
             "euler", "simple", object(), object(), {"samples": np.zeros((1, 4, 8, 8))})
-        self.assertIsNone(self.sample_calls[0]["callback"])
+        self.assertTrue(callable(self.sample_calls[0]["callback"]))
         self.assertTrue(self.sample_calls[0]["disable_pbar"])
+        self.assertEqual(self.public_events, [])
+        self.assertEqual(self.progress_samples, [
+            {"phase": "sampling", "completedSteps": step, "totalSteps": 20} for step in range(1, 21)])
+        finishing = await (await self.client.get(base + "/" + self.id, headers=self.auth)).json()
+        self.assertEqual(finishing, {"status": "processing", "progress": {"phase": "finishing"}})
+        self.assertNotIn("Change the face", json.dumps(finishing))
         self.plugin.JOBS.complete(self.id, self.png)
         digest = hashlib.sha256(self.png).hexdigest()
         self.assertEqual((await (await self.client.get(base + "/" + self.id, headers=self.auth)).json())["sha256"], digest)
+        self.assertNotIn("progress", self.plugin.JOBS.status(self.id))
         self.assertEqual(await (await self.client.get(base + "/" + self.id + "/output", headers=self.auth)).read(), self.png)
         self.assertEqual((await self.client.post(base + "/" + self.id + "/ack", headers=self.auth, json={"sha256": "0" * 64})).status, 409)
         for _ in range(2):

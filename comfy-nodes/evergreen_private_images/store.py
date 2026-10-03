@@ -188,8 +188,36 @@ class PrivateJobs:
             # Write before enqueue. A crash here fails the job at startup, never
             # re-enqueues its same ID or sends the photos through generic upload.
             manifest["state"] = "processing"
+            manifest["progress"] = {"phase": "queued"}
             self._save_manifest(identity, manifest)
             return signature
+
+    def progress(self, identity, phase, completed_steps=None, total_steps=None):
+        """Only bounded scalar telemetry; never accept images or callback payloads."""
+        phases = {"queued": 0, "preparing": 1, "sampling": 2, "finishing": 3}
+        if phase not in phases:
+            raise ValueError("Invalid private progress phase")
+        value = {"phase": phase}
+        if phase == "sampling":
+            if type(completed_steps) is not int or type(total_steps) is not int or total_steps != 20 or not 0 <= completed_steps <= total_steps:
+                raise ValueError("Invalid private sampling progress")
+            value.update(completedSteps=completed_steps, totalSteps=total_steps)
+        elif completed_steps is not None or total_steps is not None:
+            raise ValueError("Only sampling reports steps")
+        with self.lock:
+            manifest = self._manifest(identity)
+            if manifest["state"] != "processing" or manifest["expiresAt"] <= self.clock():
+                return
+            if phase == "sampling" and manifest.get("operation") == "selection":
+                raise ValueError("Selection jobs do not have sampling steps")
+            previous = manifest.get("progress", {})
+            if phases.get(previous.get("phase"), -1) > phases[phase]:
+                return
+            if phase == previous.get("phase") == "sampling" and previous["completedSteps"] > completed_steps:
+                return
+            if previous != value:
+                manifest["progress"] = value
+                self._save_manifest(identity, manifest)
 
     def signature(self, graph):
         # Comfy adds this transient cache fingerprint during execution. It is
@@ -216,6 +244,7 @@ class PrivateJobs:
                 raise ValueError("Private image job expired before completion")
             self._write_blob(identity, "output", data)
             manifest["state"] = "completed"
+            manifest.pop("progress", None)
             manifest["outputSha256"] = hashlib.sha256(data).hexdigest()
             self._save_manifest(identity, manifest)
             self._remove_payloads(identity, keep_output=True)
@@ -233,6 +262,7 @@ class PrivateJobs:
             # Persist the tombstone first, preventing a late worker from
             # publishing after cleanup. Repetition removes any crash leftovers.
             manifest["state"] = state
+            manifest.pop("progress", None)
             manifest.pop("graphSignature", None)
             self._save_manifest(identity, manifest)
             self._remove_payloads(identity)
