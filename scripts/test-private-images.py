@@ -97,6 +97,31 @@ class PrivateJobTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.reserve(identity=str(uuid.uuid4()), **change)
 
+    def test_fast_profile_is_immutable_and_progress_matches_its_steps(self):
+        manifest, fresh = self.reserve(profile="fast12-v1")
+        self.assertTrue(fresh)
+        self.assertEqual(manifest["profile"], "fast12-v1")
+        self.assertFalse(self.reserve(profile="fast12-v1")[1])
+        with self.assertRaises(ValueError):
+            self.reserve()
+        for profile in ["standard", "fast", "fast4-v1", 12, True]:
+            with self.assertRaises(ValueError):
+                self.reserve(identity=str(uuid.uuid4()), profile=profile)
+        for operation in ["selection", "viewpoint"]:
+            with self.assertRaises(ValueError):
+                self.reserve(identity=str(uuid.uuid4()), reference=None, profile="fast12-v1", operation=operation)
+        self.store.authorize_graph(self.identity, self.graph)
+        self.store.progress(self.identity, "sampling", 1, 12)
+        self.assertEqual(self.store.status(self.identity)["progress"]["totalSteps"], 12)
+        with self.assertRaises(ValueError):
+            self.store.progress(self.identity, "sampling", 2, 20)
+        self.store.complete(self.identity, self.source)
+        restarted = module.PrivateJobs(self.base / "jobs", self.key, lambda: self.now[0])
+        self.assertEqual(restarted.status(self.identity)["profile"], "fast12-v1")
+        self.assertEqual(restarted.read_blob(self.identity, "output"), self.source)
+        restarted.acknowledge(self.identity, hashlib.sha256(self.source).hexdigest())
+        self.assertFalse(list((self.base / "jobs" / self.identity).glob("*.sealed")))
+
     def test_selection_json_is_encrypted_recoverable_and_removed_on_ack(self):
         self.reserve(reference=None, instruction="person", operation="selection")
         self.store.authorize_graph(self.identity, self.graph)
@@ -260,7 +285,7 @@ class PrivateJobTests(unittest.TestCase):
         self.store.progress(self.identity, "preparing")
         self.assertEqual(self.store.status(self.identity)["progress"], {"phase": "sampling", "completedSteps": 4, "totalSteps": 20})
         for args in [("unknown",), ("sampling", -1, 20), ("sampling", 21, 20), ("sampling", True, 20),
-                     ("sampling", 1, 21), ("sampling", 1.5, 20), ("queued", 1, 20)]:
+                     ("sampling", 1, 21), ("sampling", 1, 12), ("sampling", 1.5, 20), ("queued", 1, 20)]:
             with self.assertRaises(ValueError):
                 self.store.progress(self.identity, *args)
         self.store.progress(self.identity, "finishing")
