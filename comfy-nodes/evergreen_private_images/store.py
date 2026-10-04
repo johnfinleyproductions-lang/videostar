@@ -17,6 +17,7 @@ import uuid
 from pathlib import Path
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from .upscale import WORKFLOW as UPSCALE_WORKFLOW, validate_dimensions as validate_upscale_dimensions
+from .outpaint import WORKFLOW as OUTPAINT_WORKFLOW, validate_inputs as validate_outpaint_inputs
 
 MAX_BYTES = 20 * 1024 * 1024
 TTL_SECONDS = 24 * 60 * 60
@@ -125,13 +126,15 @@ class PrivateJobs:
 
     def reserve(self, identity, source, reference, instruction, seed, width, height, reference2=None, operation=None, profile=None):
         job_id(identity)
-        if operation not in {None, "selection", "viewpoint", "upscale"}:
+        if operation not in {None, "selection", "viewpoint", "upscale", "outpaint"}:
             raise ValueError("Invalid private operation")
         if profile not in {None, "fast12-v1"} or (profile is not None and operation is not None):
             raise ValueError("Invalid private speed profile")
         if reference2 is not None and reference is None:
             raise ValueError("The third image requires the second image")
-        if operation is not None and (reference is not None or reference2 is not None):
+        if operation == "outpaint" and (reference is None or reference2 is not None):
+            raise ValueError("Outpaint requires exactly one source and one mask")
+        if operation not in {None, "outpaint"} and (reference is not None or reference2 is not None):
             raise ValueError("This operation accepts a single source")
         if type(seed) is not int or not 0 <= seed <= 0x7FFFFFFF:
             raise ValueError("Invalid pinned image settings")
@@ -149,6 +152,8 @@ class PrivateJobs:
         for data in [source, *([reference] if reference is not None else []), *([reference2] if reference2 is not None else [])]:
             if not data or len(data) > MAX_BYTES or not data.startswith(b"\x89PNG\r\n\x1a\n"):
                 raise ValueError("Private jobs accept only bounded canonical PNGs")
+        if operation == "outpaint":
+            validate_outpaint_inputs(source, reference, width, height)
         request = {"source": hashlib.sha256(source).hexdigest(),
             "reference": hashlib.sha256(reference).hexdigest() if reference else None,
             "instruction": instruction, "seed": seed, "width": width, "height": height}
@@ -159,6 +164,8 @@ class PrivateJobs:
             request["operation"] = operation
         if operation == "upscale":
             request["workflow"] = UPSCALE_WORKFLOW
+        elif operation == "outpaint":
+            request["workflow"] = OUTPAINT_WORKFLOW
         if profile is not None:
             request["profile"] = profile
         request_hash = hashlib.sha256(canonical(request)).hexdigest()
@@ -189,6 +196,8 @@ class PrivateJobs:
                     manifest["operation"] = operation
                 if operation == "upscale":
                     manifest["workflow"] = UPSCALE_WORKFLOW
+                elif operation == "outpaint":
+                    manifest["workflow"] = OUTPAINT_WORKFLOW
                 if profile is not None:
                     manifest["profile"] = profile
                 self._save_manifest(identity, manifest)

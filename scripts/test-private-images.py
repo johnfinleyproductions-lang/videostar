@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import importlib.util
+import io
 import os
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ import tempfile
 import unittest
 import uuid
 from types import SimpleNamespace
+from PIL import Image
 
 package = Path(__file__).resolve().parents[1] / "comfy-nodes/evergreen_private_images"
 spec = importlib.util.spec_from_file_location("private_store", package / "store.py", submodule_search_locations=[str(package)])
@@ -157,6 +159,46 @@ class PrivateJobTests(unittest.TestCase):
         self.assertEqual(reopened.read_blob(self.identity, "output"), self.source)
         reopened.acknowledge(self.identity, hashlib.sha256(self.source).hexdigest())
         self.assertFalse(list((self.base / "jobs" / self.identity).glob("*.sealed")))
+
+    def test_outpaint_pins_mask_workflow_and_recovery_without_changing_legacy_identity(self):
+        source = io.BytesIO(); Image.new("RGB", (768, 768), "blue").save(source, format="PNG")
+        mask_image = Image.new("L", (768, 768), 255); mask_image.paste(0, (100, 100, 700, 700))
+        mask = io.BytesIO(); mask_image.save(mask, format="PNG")
+        settings = dict(source=source.getvalue(), reference=mask.getvalue(), operation="outpaint")
+        manifest, fresh = self.reserve(**settings)
+        self.assertTrue(fresh)
+        self.assertEqual(manifest["workflow"], module.OUTPAINT_WORKFLOW)
+        expected = {"source": hashlib.sha256(settings["source"]).hexdigest(), "reference": hashlib.sha256(settings["reference"]).hexdigest(),
+            "instruction": self.instruction, "seed": 10, "width": 768, "height": 768, "operation": "outpaint", "workflow": module.OUTPAINT_WORKFLOW}
+        self.assertEqual(manifest["requestHash"], hashlib.sha256(module.canonical(expected)).hexdigest())
+        self.assertFalse(self.reserve(**settings)[1])
+        mask_image.putpixel((101, 101), 255); other = io.BytesIO(); mask_image.save(other, format="PNG")
+        for change in [dict(operation=None), dict(reference=other.getvalue()), dict(reference=None), dict(reference2=mask.getvalue()), dict(profile="fast12-v1"), dict(seed=12)]:
+            with self.assertRaises(ValueError):
+                self.reserve(**{**settings, **change})
+        self.store.authorize_graph(self.identity, self.graph)
+        self.store.progress(self.identity, "sampling", 1, 20)
+        with self.assertRaises(ValueError):
+            self.store.progress(self.identity, "sampling", 2, 12)
+        self.store.complete(self.identity, source.getvalue())
+        reopened = module.PrivateJobs(self.base / "jobs", self.key, lambda: self.now[0])
+        self.assertEqual(reopened.status(self.identity)["workflow"], module.OUTPAINT_WORKFLOW)
+        self.assertEqual(reopened.read_blob(self.identity, "output"), source.getvalue())
+        reopened.acknowledge(self.identity, hashlib.sha256(source.getvalue()).hexdigest())
+        self.assertFalse(list((self.base / "jobs" / self.identity).glob("*.sealed")))
+        self.assertFalse(reopened.reserve(identity=self.identity, instruction=self.instruction, seed=10, width=768, height=768, **settings)[1])
+
+    def test_outpaint_restart_fails_active_receipt_and_erases_both_images(self):
+        source = io.BytesIO(); Image.new("RGB", (768, 768), "blue").save(source, format="PNG")
+        mask_image = Image.new("L", (768, 768), 255); mask_image.paste(0, (100, 100, 700, 700))
+        mask = io.BytesIO(); mask_image.save(mask, format="PNG")
+        settings = dict(source=source.getvalue(), reference=mask.getvalue(), operation="outpaint")
+        self.reserve(**settings)
+        self.store.authorize_graph(self.identity, self.graph)
+        reopened = module.PrivateJobs(self.base / "jobs", self.key, lambda: self.now[0])
+        self.assertEqual(reopened.status(self.identity)["state"], "failed")
+        self.assertFalse(list((self.base / "jobs" / self.identity).glob("*.sealed")))
+        self.assertFalse(reopened.reserve(identity=self.identity, instruction=self.instruction, seed=10, width=768, height=768, **settings)[1])
 
     def test_whole_graph_is_pinned_against_read_or_output_redirection(self):
         tag = self.active()
