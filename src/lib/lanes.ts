@@ -406,7 +406,7 @@ export const LANES: readonly LaneDescriptor[] = [
     laneKey: "WAN-ANIMATE",
     title: "Wan-Animate 2 (Virtual Actor)",
     description:
-      "VIRTUAL ACTOR: a driving performance video + one character still \u2192 that character performing the same motion, rendered at the DRIVER'S fps with the driver's audio carried through. Requires BOTH videoUrl (the performance to copy) and imageUrl (the character master \u2014 keep one canonical still per character and reuse it every shot, that is what holds the identity). Motion is COPIED, not invented: pose_strength 1.0 transfers the driver verbatim, so this fixes appearance, never delivery \u2014 a flat read in is a flat read out. The frame is fully regenerated (no background_video / character_mask on this node), so the driver's real background does NOT survive; matte the result and composite if a real plate must be kept. Distilled int8, 10 steps, cfg 1.0, 81 frames (~3.4s at 24fps) per pass \u2014 chain passes for longer. Explicit selection only, never a default.",
+      "VIRTUAL ACTOR: a driving performance video + one character still \u2192 that character performing the same motion, rendered at the DRIVER'S fps with the driver's audio carried through. Requires BOTH videoUrl (the performance to copy) and imageUrl (the character master \u2014 keep one canonical still per character and reuse it every shot, that is what holds the identity). Motion is COPIED, not invented: pose_strength 1.0 transfers the driver verbatim, so this fixes appearance, never delivery \u2014 a flat read in is a flat read out. The frame is fully regenerated (no background_video / character_mask on this node), so the driver's real background does NOT survive; matte the result and composite if a real plate must be kept. Distilled int8, 10 steps, cfg 1.0, renders the driving clip's own length (snapped down to 4n+1), up to 161 frames per pass \u2014 chain passes for longer. Explicit selection only, never a default.",
     kind: "wan-animate",
     executor: "generate",
     endpoint: "/api/generate",
@@ -439,6 +439,12 @@ export const LANES: readonly LaneDescriptor[] = [
         description:
           "How strongly frames attend to the character still (0..1, default 1.0). Lower drifts off the likeness.",
       },
+      {
+        name: "frames",
+        type: "number",
+        description:
+          "Optional render length in frames (snapped to the Wan 4n+1 grid, 5..161). OMIT IT to render exactly the driving clip's own length: the server header-probes videoUrl and snaps DOWN to 4n+1 (never pads past the driver). A driver longer than 161 frames is refused with a 400 unless an explicit frames ≤ 161 opts into rendering just its head. Falls back to 81 only when the clip header cannot be probed (e.g. a tail-moov mp4).",
+      },
     ],
   },
   {
@@ -470,6 +476,12 @@ export const LANES: readonly LaneDescriptor[] = [
         required: true,
         description:
           "REQUIRED: the subject mask, frame-for-frame with videoUrl (white = subject/replace, matching MATTE's alpha convention) — an http-fetchable mask VIDEO (a still is NOT auto-repeated here, unlike VACE's vace-inpaint; pass a proper mask video, e.g. the MATTE lane's own output run on the same source clip). maskPath / mask accepted alternatives.",
+      },
+      {
+        name: "frames",
+        type: "number",
+        description:
+          "Optional render length in frames (snapped to the Wan 4n+1 grid, 5..161). OMIT IT to render exactly the driving clip's own length: the server header-probes videoUrl and snaps DOWN to 4n+1 (never pads past the driver). A driver longer than 161 frames is refused with a 400 unless an explicit frames ≤ 161 opts into rendering just its head. Falls back to 81 only when the clip header cannot be probed (e.g. a tail-moov mp4).",
       },
     ],
   },

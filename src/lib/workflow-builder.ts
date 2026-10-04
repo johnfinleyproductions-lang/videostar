@@ -737,6 +737,87 @@ export function wanAnimateLength(frames?: number): number {
   return Math.min(WAN_ANIMATE_MAX_LENGTH, Math.max(5, snapped));
 }
 
+/** The source-frame facts wanFramesFromSource needs (a VideoProbeResult fits). */
+export type WanSourceProbe = {
+  frameCount?: number;
+  durationSeconds?: number;
+  fps?: number;
+};
+
+export type WanFramesDecision =
+  | {
+      ok: true;
+      /** The 4n+1 length to patch into the Wan node. */
+      frames: number;
+      /** Where the number came from — logged, so a default is never silent. */
+      basis: "explicit" | "probed" | "default";
+      /** Frames in the driving clip when known (probe), else undefined. */
+      sourceFrames?: number;
+    }
+  | { ok: false; error: string };
+
+/**
+ * Size a WAN-ANIMATE / WAN-REPLACE pass from the DRIVING CLIP instead of the
+ * fixed 81-frame recipe length. Before this, an absent `frames` always meant
+ * 81, so a 65-frame source rendered 81 frames and the background video and
+ * character mask ran out 16 frames early (measured 2026-09-28).
+ *
+ * - An explicit finite `frames` still wins (snapped/clamped as before).
+ * - Otherwise the probed source length is snapped DOWN to the Wan 4n+1 grid,
+ *   so the render never outruns its driver (at most 3 tail frames dropped).
+ * - A clip longer than WAN_ANIMATE_MAX_LENGTH is REFUSED with an honest
+ *   message rather than silently truncated; an explicit frames ≤ cap opts
+ *   into rendering just the head (the MATTE lane's precedent).
+ * - A clip too short for one latent step (< 5 frames) is refused.
+ * - An unprobeable source falls back to the 81 default, flagged basis
+ *   "default" so the caller can log it.
+ */
+export function wanFramesFromSource(
+  explicitFrames: number | undefined,
+  probe: WanSourceProbe | undefined,
+  laneLabel = "This lane",
+): WanFramesDecision {
+  if (explicitFrames !== undefined && Number.isFinite(explicitFrames)) {
+    return { ok: true, frames: wanAnimateLength(explicitFrames), basis: "explicit" };
+  }
+  let sourceFrames: number | undefined;
+  if (probe?.frameCount !== undefined && Number.isFinite(probe.frameCount) && probe.frameCount > 0) {
+    sourceFrames = Math.floor(probe.frameCount);
+  } else if (
+    probe?.durationSeconds !== undefined &&
+    probe.fps !== undefined &&
+    Number.isFinite(probe.durationSeconds) &&
+    Number.isFinite(probe.fps) &&
+    probe.durationSeconds > 0 &&
+    probe.fps > 0
+  ) {
+    // WebM headers carry duration + fps but no sample table; round, since a
+    // container duration can land a hair under the exact frame boundary.
+    sourceFrames = Math.round(probe.durationSeconds * probe.fps);
+  }
+  if (sourceFrames === undefined) {
+    return { ok: true, frames: WAN_ANIMATE_DEFAULT_LENGTH, basis: "default" };
+  }
+  if (sourceFrames > WAN_ANIMATE_MAX_LENGTH) {
+    return {
+      ok: false,
+      error:
+        `${laneLabel}: the driving clip is ${sourceFrames} frames` +
+        (probe?.fps ? ` (${(sourceFrames / probe.fps).toFixed(2)}s @ ${probe.fps}fps)` : "") +
+        ` — one pass caps at ${WAN_ANIMATE_MAX_LENGTH} frames. Cut the clip into ≤${WAN_ANIMATE_MAX_LENGTH}-frame ` +
+        `pieces and chain passes, or pass frames ≤ ${WAN_ANIMATE_MAX_LENGTH} to render just the head of this clip.`,
+    };
+  }
+  if (sourceFrames < 5) {
+    return {
+      ok: false,
+      error: `${laneLabel}: the driving clip is only ${sourceFrames} frame(s) — a Wan pass needs at least 5.`,
+    };
+  }
+  const snappedDown = Math.floor((sourceFrames - 1) / 4) * 4 + 1;
+  return { ok: true, frames: snappedDown, basis: "probed", sourceFrames };
+}
+
 /** WanAnimate2ToVideo takes width/height on a 16px grid. */
 function wanAnimateDim(value: number | undefined, fallback: number): number {
   const raw = Number.isFinite(value) ? (value as number) : fallback;
