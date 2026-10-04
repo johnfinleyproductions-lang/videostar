@@ -16,6 +16,7 @@ import time
 import uuid
 from pathlib import Path
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from .upscale import WORKFLOW as UPSCALE_WORKFLOW, validate_dimensions as validate_upscale_dimensions
 
 MAX_BYTES = 20 * 1024 * 1024
 TTL_SECONDS = 24 * 60 * 60
@@ -124,7 +125,7 @@ class PrivateJobs:
 
     def reserve(self, identity, source, reference, instruction, seed, width, height, reference2=None, operation=None, profile=None):
         job_id(identity)
-        if operation not in {None, "selection", "viewpoint"}:
+        if operation not in {None, "selection", "viewpoint", "upscale"}:
             raise ValueError("Invalid private operation")
         if profile not in {None, "fast12-v1"} or (profile is not None and operation is not None):
             raise ValueError("Invalid private speed profile")
@@ -132,7 +133,14 @@ class PrivateJobs:
             raise ValueError("The third image requires the second image")
         if operation is not None and (reference is not None or reference2 is not None):
             raise ValueError("This operation accepts a single source")
-        if any(type(value) is not int for value in (seed, width, height)) or not 0 <= seed <= 0x7FFFFFFF or not 768 <= width <= 1536 or not 768 <= height <= 1536 or width % 32 or height % 32:
+        if type(seed) is not int or not 0 <= seed <= 0x7FFFFFFF:
+            raise ValueError("Invalid pinned image settings")
+        if operation == "upscale":
+            validate_upscale_dimensions(width, height)
+            if instruction != UPSCALE_WORKFLOW:
+                raise ValueError("Upscale instructions are server owned")
+        elif (any(type(value) is not int for value in (width, height)) or not 768 <= width <= 1536
+                or not 768 <= height <= 1536 or width % 32 or height % 32):
             raise ValueError("Invalid pinned image settings")
         if not isinstance(instruction, str) or not (1 if operation == "selection" else 10) <= len(instruction) <= (120 if operation == "selection" else 4000):
             raise ValueError("Invalid edit instruction")
@@ -149,6 +157,8 @@ class PrivateJobs:
             request["reference2"] = hashlib.sha256(reference2).hexdigest()
         if operation is not None:
             request["operation"] = operation
+        if operation == "upscale":
+            request["workflow"] = UPSCALE_WORKFLOW
         if profile is not None:
             request["profile"] = profile
         request_hash = hashlib.sha256(canonical(request)).hexdigest()
@@ -177,6 +187,8 @@ class PrivateJobs:
                     manifest["reference2"] = True
                 if operation is not None:
                     manifest["operation"] = operation
+                if operation == "upscale":
+                    manifest["workflow"] = UPSCALE_WORKFLOW
                 if profile is not None:
                     manifest["profile"] = profile
                 self._save_manifest(identity, manifest)
@@ -214,8 +226,8 @@ class PrivateJobs:
             manifest = self._manifest(identity)
             if manifest["state"] != "processing" or manifest["expiresAt"] <= self.clock():
                 return
-            if phase == "sampling" and manifest.get("operation") == "selection":
-                raise ValueError("Selection jobs do not have sampling steps")
+            if phase == "sampling" and manifest.get("operation") in {"selection", "upscale"}:
+                raise ValueError("This private operation does not have Qwen sampling steps")
             if phase == "sampling" and total_steps != (12 if manifest.get("profile") == "fast12-v1" else 20):
                 raise ValueError("Sampling steps do not match the pinned profile")
             previous = manifest.get("progress", {})

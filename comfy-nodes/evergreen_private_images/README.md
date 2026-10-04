@@ -6,6 +6,64 @@ Comfy modality remains the model runtime.
 
 ## Release state
 
+### Private photo upscale (release validation pending)
+
+`POST /evergreen-private/upscales` accepts exactly `id`, `source`, `width`,
+`height`, and `seed`. The source is an original-size canonical **RGB PNG**;
+Core decodes it in isolation and flattens onto white without Qwen's working-size
+resize. Core retains source alpha and restores its deterministic 2× alpha after
+verifying the generated RGB. No prompt, references, speed profile, arbitrary
+model or scale is accepted. The server pins `operation: "upscale"` and workflow
+`seedvr2-private-upscale-2x-v1` in the immutable request identity and manifest.
+
+Capability `upscales` advertises the model `seedvr2-7b-sharp-fp8`, workflow,
+`scale: 2`, input sides 16–8192, input at most 3,000,000 pixels, and output at
+most 12,000,000 pixels. Stored input and output each retain the existing 20 MiB
+bound. Output must be exactly twice both input dimensions, including odd source
+dimensions. Oversized sources must be explained by Core; do not silently shrink
+them while labeling the result 2×. The enlarged grid is generated detail, not
+pixel-identical preservation or recovery of real information that was absent.
+
+The signed graph has only `EvergreenPrivateImage → EvergreenPrivateUpscale →
+EvergreenPrivateOutput`. It reuses authenticated private status/output/ACK/DELETE,
+encrypted storage, 24-hour expiry, crash cleanup, idempotent same-ID receipts,
+no public images, and cleared execution caches. Progress remains indeterminate
+`preparing` until `finishing`; the Qwen 12/20 sampling counters do not apply.
+
+The adapter uses the already installed SeedVR2 **2.5.24**, commit
+`4490bd1f482e026674543386bb2a4d176da245b9`, with
+`seedvr2_ema_7b_sharp_fp8_e4m3fn.safetensors` (8,239,729,704 bytes) and
+`ema_vae_fp16.safetensors` (501,324,814 bytes). Read-only live checks confirmed
+allocated/nonzero safetensor data and bundled positive/negative embeddings.
+Conventional `UpscaleModelLoader` has no installed image models. The official
+[SeedVR2 documentation](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)
+describes image support; installed inference and visual quality remain a
+separate release check.
+
+Upstream's normal executor calls a downloader that may delete and replace a
+corrupt model. **Private execution never calls it.** The adapter clones the
+reviewed execute function with a local globals map whose `download_weight`
+entry only verifies installed pinned files. It never monkeypatches the shared
+module. The execute-file fingerprint and embedding digests must match; unknown
+code fails closed pending compatibility review. File size/allocation, bounded
+safetensor metadata and nonzero data are admission checks, not full model
+checksum or quality claims. Rechecks occur before execution. No model download,
+repair, installation, upstream source edit or startup change is permitted here.
+
+Fixed processing uses one frame, CUDA 0, SDPA, no noise injection, LAB color
+correction, CPU offload, 512-pixel VAE encode/decode tiles with 64 overlap,
+disabled model caching/compilation, and no debug output request. The upstream
+pipeline frees its context and embeddings; the existing private execution
+boundary clears Comfy caches and suppresses public websocket events. Same-size
+detail improvement and 4× enlargement are intentionally later profiles: the
+installed upstream rounds odd target dimensions down to even for video.
+
+Before enabling Core, run the full worker tests and independently review an
+idle-gated plugin cutover. Then verify one actual RGB photo and transparent
+approved-result upscale: exact 2× dimensions, alpha restoration, private
+download/digest, refresh/recovery, visual detail and completed ACK cleanup.
+Do not claim this local fixture test proves live speed, memory use or quality.
+
 ### Experimental fast preview
 
 The optional image request `profile: "fast12-v1"` uses the existing Qwen 2509
@@ -243,6 +301,8 @@ From the VideoStar checkout, with the installed runtime's dependencies:
   websocket denial.
 - `python scripts/test-private-selections.py` — separate instances, holes,
   nested islands, bounded vertices and refusal of invalid/overcomplex masks.
+- `python scripts/test-private-upscale.py` — pinned local assets/implementation,
+  no downloader or global mutation, fixed settings and exact output bounds.
 - `node scripts/comfy-auth.test.mjs` — scoped server credentials, redirect
   refusal, private history filtering and unavailable-key behavior.
 - `node scripts/qwen-two-image.test.mjs` — existing ordinary Qwen graphs.
