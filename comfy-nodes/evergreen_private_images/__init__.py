@@ -24,7 +24,7 @@ from server import PromptServer
 from .store import PrivateJobs, canonical, job_id
 from .runtime import install_runtime_boundary
 from .selections import describe_masks
-from . import upscale
+from . import upscale, outpaint
 
 KEY_FILE = os.environ.get("EVERGREEN_PRIVATE_IMAGE_KEY_FILE")
 ROOT = os.environ.get("EVERGREEN_PRIVATE_IMAGE_ROOT")
@@ -62,6 +62,8 @@ class PrivateImage:
                 raise ValueError("Invalid canonical private input")
             if manifest.get("operation") == "upscale" and image.mode != "RGB":
                 raise ValueError("Private upscale requires canonical RGB; alpha stays in Core")
+            if manifest.get("operation") == "outpaint":
+                outpaint.validate_image(image, manifest["width"], manifest["height"], mask=slot == "reference")
             if slot == "source" and (image.width != manifest["width"] or image.height != manifest["height"]):
                 raise ValueError("Source dimensions do not match the pinned request")
             pixels = np.array(image.convert("RGB"), dtype=np.float32) / 255.0
@@ -227,6 +229,8 @@ NODE_CLASS_MAPPINGS = {"EvergreenPrivateImage": PrivateImage, "EvergreenPrivateI
 def build_graph(manifest):
     identity = manifest["id"]
     private = {"identity": identity, "authorization": ""}
+    if manifest.get("operation") == "outpaint" and manifest.get("workflow") != outpaint.WORKFLOW:
+        raise ValueError("Unsupported private outpaint workflow")
     if manifest.get("operation") == "upscale":
         return {
             "7": {"class_type": "EvergreenPrivateUpscale", "inputs": {**private, "image": ["10", 0]}},
@@ -263,8 +267,15 @@ def build_graph(manifest):
     }
     if manifest["reference"]:
         graph["11"] = {"class_type": "EvergreenPrivateImage", "inputs": {**private, "slot": "reference"}}
-        graph["4"]["inputs"]["image2"] = ["11", 0]
-        graph["5"]["inputs"]["image2"] = ["11", 0]
+        if manifest.get("operation") == "outpaint":
+            # White permits denoising; black restores the source latent at each
+            # step. This mask never becomes a semantic image reference.
+            graph["16"] = {"class_type": "ImageToMask", "inputs": {"image": ["11", 0], "channel": "red"}}
+            graph["17"] = {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["6", 0], "mask": ["16", 0]}}
+            graph["7"]["inputs"]["latent_image"] = ["17", 0]
+        else:
+            graph["4"]["inputs"]["image2"] = ["11", 0]
+            graph["5"]["inputs"]["image2"] = ["11", 0]
     if manifest.get("reference2"):
         graph["15"] = {"class_type": "EvergreenPrivateImage", "inputs": {**private, "slot": "reference2"}}
         graph["4"]["inputs"]["image3"] = ["15", 0]
@@ -288,6 +299,8 @@ def supports_reference(slot="image2"):
 def ready_assets(operation=None):
     if operation == "upscale":
         return upscale.ready(nodes.NODE_CLASS_MAPPINGS.get("SeedVR2VideoUpscaler"))
+    if operation == "outpaint":
+        return ready_assets() and outpaint.ready(nodes.NODE_CLASS_MAPPINGS)
     if operation == "selection":
         return ("sam3.1_multiplex_fp16.safetensors" in folder_paths.get_filename_list("checkpoints")
             and all(name in nodes.NODE_CLASS_MAPPINGS for name in ["SAM3_Detect", "CheckpointLoaderSimple", "CLIPTextEncode"]))
@@ -364,6 +377,8 @@ def start_routes(jobs):
             "upscales": {"ready": ready_assets("upscale"), "model": upscale.MODEL, "workflow": upscale.WORKFLOW,
                 "scale": 2, "minInputSide": upscale.MIN_SIDE, "maxInputSide": upscale.MAX_SIDE,
                 "maxInputPixels": upscale.MAX_INPUT_PIXELS, "maxOutputPixels": upscale.MAX_OUTPUT_PIXELS},
+            "outpaint": {"ready": ready_assets("outpaint"), "workflow": outpaint.WORKFLOW,
+                "steps": outpaint.STEPS, "binaryMask": True, "maskPolarity": outpaint.MASK_POLARITY},
             "layers": {"ready": False}, "scalarProgress": True, "speedProfiles": ["fast12-v1"]}, headers=headers)
 
     @routes.post("/evergreen-private/images")
@@ -394,11 +409,13 @@ def start_routes(jobs):
             if not isinstance(body, dict) or set(body) - allowed:
                 raise ValueError("Unexpected private job fields")
             operation = "upscale" if upscaling else "selection" if selection else body.get("operation")
-            if not selection and not upscaling and operation not in {None, "viewpoint"}:
+            if not selection and not upscaling and operation not in {None, "viewpoint", "outpaint"}:
                 raise ValueError("Invalid image operation")
+            if operation == "outpaint" and ("reference2" in body or "profile" in body):
+                raise ValueError("Outpaint accepts exactly one mask at Standard quality")
             if not ready_assets(operation):
                 return web.json_response({"error": "Pinned private model unavailable"}, status=503, headers=headers)
-            if body.get("reference") and not supports_reference():
+            if operation != "outpaint" and body.get("reference") and not supports_reference():
                 return web.json_response({"error": "Second image input unavailable"}, status=503, headers=headers)
             if body.get("reference2") and not supports_reference("image3"):
                 return web.json_response({"error": "Third image input unavailable"}, status=503, headers=headers)

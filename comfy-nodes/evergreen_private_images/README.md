@@ -6,6 +6,47 @@ Comfy modality remains the model runtime.
 
 ## Release state
 
+### Structural masked outpaint (release validation pending)
+
+`POST /evergreen-private/images` accepts `operation: "outpaint"` with exactly
+one source and one `reference` containing an **opaque binary mask**. The source
+must be canonical RGB PNG; the mask may be L or RGB PNG, with only black (0)
+and white (255) pixels and both regions present. Both PNGs must have the exact
+declared width and height. The existing bounds remain: 768–1536 pixels per
+side on a 32-pixel grid, and 20 MiB per image. Profile and third-reference fields
+are rejected, including null placeholders. Standard 20 steps is the only mode.
+
+The server pins operation and workflow
+`qwen-image-edit-2509-private-expand-masked-v1` into the request hash and
+manifest. Same-ID retries cannot change the mask, source, prompt, geometry,
+seed or operation. Legacy ordinary/Fast/selection/viewpoint/upscale identities
+and graphs retain their prior behavior. The capability is
+`outpaint: { ready, workflow, steps: 20, binaryMask: true,
+maskPolarity: "white-edit-black-protect" }`; readiness also requires installed
+Qwen assets and matching VAEEncode, ImageToMask and SetLatentNoiseMask contracts.
+Readiness does not establish visual quality; Core must keep its feature gate off
+until the installed workflow passes acceptance.
+
+Core prepares source and mask with **one explicit geometric transform**. Resize
+the source with `fit: "fill"` and the mask with the same dimensions using nearest
+neighbor; never pass the mask through ordinary photo preparation's cover crop.
+Keep the original full-resolution photo and final placement immutable. The
+worker does not resize either image: it VAE-encodes the prepared source and
+converts the separate mask's red channel through `ImageToMask` into
+`SetLatentNoiseMask`. The private sampler passes this noise mask into Comfy:
+white allows generation, black preserves the source latent during every step.
+The mask is **excluded** from Qwen's positive and negative image conditioning;
+only the source image is used there. This uses installed nodes and weights.
+
+The signed graph, private sampler, scalar progress, encrypted payloads,
+runtime cache clearing, output digest, ACK/DELETE and crash/expiry cleanup are
+unchanged. Neither a public output node nor a public preview callback is added.
+Latent preservation is not a promise of exact decoded pixels: Core must still
+restore every original RGBA byte at its pinned offset. Before enabling, verify
+straight lines, scene continuity and subject size across each new border on a
+real photo, plus exact original RGBA and private cleanup. Earlier semantic-mask
+experiments reframed the photo and failed this visual gate.
+
 ### Private photo upscale (release validation pending)
 
 `POST /evergreen-private/upscales` accepts exactly `id`, `source`, `width`,
@@ -303,6 +344,10 @@ From the VideoStar checkout, with the installed runtime's dependencies:
   nested islands, bounded vertices and refusal of invalid/overcomplex masks.
 - `python scripts/test-private-upscale.py` — pinned local assets/implementation,
   no downloader or global mutation, fixed settings and exact output bounds.
+- `python scripts/test-private-outpaint.py` — opaque binary mask/source checks,
+  white/black polarity and conservative installed-node contracts. Storage and
+  HTTP suites also cover the structural graph, sampler mask propagation,
+  immutable workflow/mask recovery, signed graph tampering and ACK erasure.
 - `node scripts/comfy-auth.test.mjs` — scoped server credentials, redirect
   refusal, private history filtering and unavailable-key behavior.
 - `node scripts/qwen-two-image.test.mjs` — existing ordinary Qwen graphs.

@@ -77,6 +77,11 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
         mod("nodes", NODE_CLASS_MAPPINGS={"TextEncodeQwenImageEditPlus": SimpleNamespace(INPUT_TYPES=lambda: {"optional": {"image2": ("IMAGE",), "image3": ("IMAGE",)}})},
             KSampler=SimpleNamespace(INPUT_TYPES=lambda: {"required": {}}))
         sys.modules["nodes"].NODE_CLASS_MAPPINGS["CFGNorm"] = object()
+        sys.modules["nodes"].NODE_CLASS_MAPPINGS.update({
+            "VAEEncode": SimpleNamespace(INPUT_TYPES=lambda: {"required": {"pixels": ("IMAGE",), "vae": ("VAE",)}}),
+            "SetLatentNoiseMask": SimpleNamespace(INPUT_TYPES=lambda: {"required": {"samples": ("LATENT",), "mask": ("MASK",)}}),
+            "ImageToMask": SimpleNamespace(INPUT_TYPES=lambda: {"required": {"image": ("IMAGE",), "channel": ("COMBO", {"options": ["red", "green", "blue", "alpha"]})}}),
+        })
         for name in ["SAM3_Detect", "CheckpointLoaderSimple", "CLIPTextEncode"]:
             sys.modules["nodes"].NODE_CLASS_MAPPINGS[name] = object()
         sys.modules["nodes"].NODE_CLASS_MAPPINGS["UnetLoaderGGUF"] = SimpleNamespace(INPUT_TYPES=lambda: {
@@ -106,6 +111,94 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.close()
         self.temp.cleanup()
+
+    def outpaint_payload(self):
+        mask = Image.new("L", (768, 768), 255)
+        mask.paste(0, (100, 100, 700, 700))
+        output = io.BytesIO(); mask.save(output, format="PNG")
+        return {**self.payload, "operation": "outpaint", "reference": base64.b64encode(output.getvalue()).decode()}
+
+    async def test_outpaint_graph_uses_only_structural_mask_and_scalar_sampler(self):
+        base = "/evergreen-private/images"
+        payload = self.outpaint_payload()
+        self.assertEqual((await self.client.post(base, json=payload)).status, 401)
+        capabilities = await (await self.client.get(base, headers=self.auth)).json()
+        self.assertEqual(capabilities["outpaint"], {"ready": True, "workflow": self.plugin.outpaint.WORKFLOW,
+            "steps": 20, "binaryMask": True, "maskPolarity": "white-edit-black-protect"})
+        for _ in range(2):
+            self.assertEqual((await self.client.post(base, headers=self.auth, json=payload)).status, 200)
+        self.assertEqual(len(self.queued), 1)
+        graph = self.queued[0][2]
+        for node in ["4", "5"]:
+            self.assertEqual(graph[node]["inputs"]["image1"], ["10", 0])
+            self.assertNotIn("image2", graph[node]["inputs"])
+            self.assertNotIn("image3", graph[node]["inputs"])
+        self.assertEqual(graph["6"], {"class_type": "VAEEncode", "inputs": {"pixels": ["10", 0], "vae": ["3", 0]}})
+        self.assertEqual(graph["16"], {"class_type": "ImageToMask", "inputs": {"image": ["11", 0], "channel": "red"}})
+        self.assertEqual(graph["17"], {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["6", 0], "mask": ["16", 0]}})
+        self.assertEqual(graph["7"]["inputs"]["latent_image"], ["17", 0])
+        self.assertEqual(graph["7"]["inputs"]["steps"], 20)
+        self.assertFalse(any("Resize" in node["class_type"] or "Empty" in node["class_type"] for node in graph.values()))
+        tag = graph["10"]["inputs"]["authorization"]
+        source = self.plugin.PrivateImage().load(self.id, "source", tag, graph)[0]
+        pixels = self.plugin.PrivateImage().load(self.id, "reference", tag, graph)[0]
+        self.assertEqual(source.shape, pixels.shape)
+        # ImageToMask selects the named RGB channel; white=1, black=0. The
+        # private sampler must pass that exact mask to Comfy without inversion.
+        mask = pixels[:, :, :, 0].reshape(1, 1, 768, 768)
+        self.assertEqual(mask[0, 0, 0, 0], 1)
+        self.assertEqual(mask[0, 0, 100, 100], 0)
+        self.plugin.PrivateSampler().sample(self.id, tag, graph, object(), 42, 20, 2.5,
+            "euler", "simple", object(), object(), {"samples": np.zeros((1, 4, 96, 96)), "noise_mask": mask})
+        self.assertIs(self.sample_calls[0]["noise_mask"], mask)
+        self.assertTrue(self.sample_calls[0]["disable_pbar"])
+        self.assertEqual(self.progress_samples[-1], {"phase": "sampling", "completedSteps": 20, "totalSteps": 20})
+        self.assertFalse(self.public_events)
+        for node, field, value in [("17", "mask", ["10", 0]), ("7", "latent_image", ["6", 0]), ("4", "image2", ["11", 0]), ("16", "channel", "alpha")]:
+            changed = json.loads(json.dumps(graph)); changed[node]["inputs"][field] = value
+            with self.assertRaises(ValueError):
+                self.plugin.JOBS.verify_graph(self.id, tag, changed)
+        self.plugin.JOBS.complete(self.id, self.png)
+        state = await (await self.client.get(base + "/" + self.id, headers=self.auth)).json()
+        self.assertEqual(state["contentType"], "image/png")
+        self.assertEqual((await self.client.post(base + "/" + self.id + "/ack", headers=self.auth, json={"sha256": state["sha256"]})).status, 200)
+        self.assertEqual((await self.client.post(base, headers=self.auth, json=payload)).status, 200)
+        self.assertEqual(len(self.queued), 1)
+        self.assertFalse(list((self.base / "jobs" / self.id).glob("*.sealed")))
+
+    async def test_outpaint_rejects_malformed_masks_and_additional_settings_before_queue(self):
+        base = "/evergreen-private/images"
+        payload = self.outpaint_payload()
+        for change in [{"reference": None}, {"reference": ""}, {"reference": self.payload["reference"]},
+                {"reference2": None}, {"reference2": self.payload["source"]}, {"profile": None}, {"profile": "fast12-v1"},
+                {"workflow": self.plugin.outpaint.WORKFLOW}, {"width": 769}]:
+            with self.subTest(change=tuple(change)):
+                self.assertEqual((await self.client.post(base, headers=self.auth, json={**payload, **change})).status, 400)
+        for image in [Image.new("L", (800, 768), 255), Image.new("L", (768, 768), 0), Image.new("RGBA", (768, 768), "white")]:
+            output = io.BytesIO(); image.save(output, format="PNG")
+            self.assertEqual((await self.client.post(base, headers=self.auth, json={**payload, "reference": base64.b64encode(output.getvalue()).decode()})).status, 400)
+        self.assertFalse(self.queued)
+        self.assertFalse(list((self.base / "jobs").iterdir()))
+        self.assertEqual((await self.client.post(base, headers=self.auth, json=payload)).status, 200)
+        self.assertEqual((await self.client.post(base, headers=self.auth, json={key: value for key, value in payload.items() if key != "operation"})).status, 400)
+        graph = self.queued[0][2]; tag = graph["10"]["inputs"]["authorization"]
+        self.plugin.JOBS._write_blob(self.id, "reference", self.png)
+        with self.assertRaises(ValueError):
+            self.plugin.PrivateImage().load(self.id, "reference", tag, graph)
+
+    async def test_outpaint_readiness_requires_nodes_but_not_semantic_second_image(self):
+        base = "/evergreen-private/images"
+        mapping = sys.modules["nodes"].NODE_CLASS_MAPPINGS
+        node = mapping.pop("SetLatentNoiseMask")
+        self.assertFalse((await (await self.client.get(base, headers=self.auth)).json())["outpaint"]["ready"])
+        self.assertEqual((await self.client.post(base, headers=self.auth, json=self.outpaint_payload())).status, 503)
+        self.assertFalse(self.queued)
+        mapping["SetLatentNoiseMask"] = node
+        mapping["TextEncodeQwenImageEditPlus"] = SimpleNamespace(INPUT_TYPES=lambda: {"required": {"image1": ("IMAGE",)}})
+        caps = await (await self.client.get(base, headers=self.auth)).json()
+        self.assertFalse(caps["twoImages"])
+        self.assertTrue(caps["outpaint"]["ready"])
+        self.assertEqual((await self.client.post(base, headers=self.auth, json=self.outpaint_payload())).status, 200)
 
     async def test_private_upscale_admission_graph_and_alpha_boundary(self):
         base = "/evergreen-private/upscales"
