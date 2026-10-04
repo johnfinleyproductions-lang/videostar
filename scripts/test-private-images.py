@@ -3,14 +3,17 @@ import copy
 import hashlib
 import importlib.util
 import os
+import sys
 from pathlib import Path
 import tempfile
 import unittest
 import uuid
 from types import SimpleNamespace
 
-spec = importlib.util.spec_from_file_location("private_store", Path(__file__).resolve().parents[1] / "comfy-nodes/evergreen_private_images/store.py")
+package = Path(__file__).resolve().parents[1] / "comfy-nodes/evergreen_private_images"
+spec = importlib.util.spec_from_file_location("private_store", package / "store.py", submodule_search_locations=[str(package)])
 module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 runtime_spec = importlib.util.spec_from_file_location("private_runtime", Path(__file__).resolve().parents[1] / "comfy-nodes/evergreen_private_images/runtime.py")
 runtime = importlib.util.module_from_spec(runtime_spec)
@@ -131,6 +134,28 @@ class PrivateJobTests(unittest.TestCase):
         self.assertEqual(restarted.read_blob(self.identity, "output"), data)
         self.assertNotIn(data, (self.base / "jobs" / self.identity / "output.sealed").read_bytes())
         restarted.acknowledge(self.identity, hashlib.sha256(data).hexdigest())
+        self.assertFalse(list((self.base / "jobs" / self.identity).glob("*.sealed")))
+
+    def test_upscale_identity_bounds_recovery_and_erasure(self):
+        settings = dict(reference=None, instruction=module.UPSCALE_WORKFLOW, operation="upscale", width=1001, height=750)
+        manifest, fresh = self.reserve(**settings)
+        self.assertTrue(fresh)
+        self.assertEqual(manifest["workflow"], "seedvr2-private-upscale-2x-v1")
+        self.assertFalse(self.reserve(**settings)[1])
+        for change in [dict(width=1002), dict(seed=12), dict(instruction="Another upscale"), dict(profile="fast12-v1"), dict(reference=self.source)]:
+            with self.assertRaises(ValueError):
+                self.reserve(**{**settings, **change})
+        for width, height in [(True, 768), (15, 100), (8193, 16), (2000, 1501), (0, 768), (768.0, 768)]:
+            with self.assertRaises(ValueError):
+                self.reserve(**{**settings, "identity": str(uuid.uuid4()), "width": width, "height": height})
+        self.store.authorize_graph(self.identity, self.graph)
+        with self.assertRaises(ValueError):
+            self.store.progress(self.identity, "sampling", 1, 20)
+        self.store.complete(self.identity, self.source)
+        reopened = module.PrivateJobs(self.base / "jobs", self.key, lambda: self.now[0])
+        self.assertEqual(reopened.status(self.identity)["workflow"], module.UPSCALE_WORKFLOW)
+        self.assertEqual(reopened.read_blob(self.identity, "output"), self.source)
+        reopened.acknowledge(self.identity, hashlib.sha256(self.source).hexdigest())
         self.assertFalse(list((self.base / "jobs" / self.identity).glob("*.sealed")))
 
     def test_whole_graph_is_pinned_against_read_or_output_redirection(self):

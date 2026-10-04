@@ -24,6 +24,7 @@ from server import PromptServer
 from .store import PrivateJobs, canonical, job_id
 from .runtime import install_runtime_boundary
 from .selections import describe_masks
+from . import upscale
 
 KEY_FILE = os.environ.get("EVERGREEN_PRIVATE_IMAGE_KEY_FILE")
 ROOT = os.environ.get("EVERGREEN_PRIVATE_IMAGE_ROOT")
@@ -56,8 +57,11 @@ class PrivateImage:
         manifest = verify(identity, authorization, prompt)
         contents = JOBS.read_blob(identity, slot)
         with Image.open(io.BytesIO(contents)) as image:
-            if image.format != "PNG" or getattr(image, "n_frames", 1) != 1 or image.width * image.height > 2_500_000:
+            limit = upscale.MAX_INPUT_PIXELS if manifest.get("operation") == "upscale" else 2_500_000
+            if image.format != "PNG" or getattr(image, "n_frames", 1) != 1 or image.width * image.height > limit:
                 raise ValueError("Invalid canonical private input")
+            if manifest.get("operation") == "upscale" and image.mode != "RGB":
+                raise ValueError("Private upscale requires canonical RGB; alpha stays in Core")
             if slot == "source" and (image.width != manifest["width"] or image.height != manifest["height"]):
                 raise ValueError("Source dimensions do not match the pinned request")
             pixels = np.array(image.convert("RGB"), dtype=np.float32) / 255.0
@@ -152,7 +156,9 @@ class PrivateOutput:
         manifest = verify(identity, authorization, prompt)
         if manifest.get("operation") == "selection":
             raise ValueError("Selections require private geometry output")
-        if len(images) != 1 or images.shape[2] != manifest["width"] or images.shape[1] != manifest["height"]:
+        scale = 2 if manifest.get("operation") == "upscale" else 1
+        if (len(images) != 1 or images.shape[2] != manifest["width"] * scale
+                or images.shape[1] != manifest["height"] * scale or (scale == 2 and images.shape[3] != 3)):
             raise ValueError("Private output dimensions changed")
         pixels = np.clip(images[0].cpu().numpy() * 255.0, 0, 255).astype(np.uint8)
         output = io.BytesIO()
@@ -160,6 +166,27 @@ class PrivateOutput:
         JOBS.complete(identity, output.getvalue())
         # No SaveImage filename, workflow metadata, preview image or /view URL.
         return {"ui": {"private_receipt": [identity]}}
+
+
+class PrivateUpscale:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"image": ("IMAGE",), "identity": ("STRING",), "authorization": ("STRING",)}, "hidden": {"prompt": "PROMPT"}}
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+    CATEGORY = "Evergreen/private"
+
+    def run(self, image, identity, authorization, prompt):
+        manifest = verify(identity, authorization, prompt)
+        JOBS.progress(identity, "preparing")
+        pixels = upscale.run(nodes.NODE_CLASS_MAPPINGS.get("SeedVR2VideoUpscaler"), image, manifest)
+        JOBS.progress(identity, "finishing")
+        return (pixels,)
 
 
 class PrivateSelectionOutput:
@@ -194,12 +221,18 @@ class PrivateSelectionOutput:
 
 NODE_CLASS_MAPPINGS = {"EvergreenPrivateImage": PrivateImage, "EvergreenPrivateInstruction": PrivateInstruction,
     "EvergreenPrivateSampler": PrivateSampler, "EvergreenPrivateOutput": PrivateOutput,
-    "EvergreenPrivateSelectionOutput": PrivateSelectionOutput}
+    "EvergreenPrivateSelectionOutput": PrivateSelectionOutput, "EvergreenPrivateUpscale": PrivateUpscale}
 
 
 def build_graph(manifest):
     identity = manifest["id"]
     private = {"identity": identity, "authorization": ""}
+    if manifest.get("operation") == "upscale":
+        return {
+            "7": {"class_type": "EvergreenPrivateUpscale", "inputs": {**private, "image": ["10", 0]}},
+            "9": {"class_type": "EvergreenPrivateOutput", "inputs": {**private, "images": ["7", 0]}},
+            "10": {"class_type": "EvergreenPrivateImage", "inputs": {**private, "slot": "source"}},
+        }
     if manifest.get("operation") == "selection":
         return {
             "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "sam3.1_multiplex_fp16.safetensors"}},
@@ -253,6 +286,8 @@ def supports_reference(slot="image2"):
 
 
 def ready_assets(operation=None):
+    if operation == "upscale":
+        return upscale.ready(nodes.NODE_CLASS_MAPPINGS.get("SeedVR2VideoUpscaler"))
     if operation == "selection":
         return ("sam3.1_multiplex_fp16.safetensors" in folder_paths.get_filename_list("checkpoints")
             and all(name in nodes.NODE_CLASS_MAPPINGS for name in ["SAM3_Detect", "CheckpointLoaderSimple", "CLIPTextEncode"]))
@@ -326,6 +361,9 @@ def start_routes(jobs):
             "threeImages": supports_reference("image3"), "maxReferences": 2 if supports_reference("image3") else (1 if supports_reference() else 0),
             "selections": {"ready": ready_assets("selection"), "model": "sam3.1"},
             "viewpoints": {"ready": ready_assets("viewpoint"), "model": "qwen-image-edit-2511-q6"},
+            "upscales": {"ready": ready_assets("upscale"), "model": upscale.MODEL, "workflow": upscale.WORKFLOW,
+                "scale": 2, "minInputSide": upscale.MIN_SIDE, "maxInputSide": upscale.MAX_SIDE,
+                "maxInputPixels": upscale.MAX_INPUT_PIXELS, "maxOutputPixels": upscale.MAX_OUTPUT_PIXELS},
             "layers": {"ready": False}, "scalarProgress": True, "speedProfiles": ["fast12-v1"]}, headers=headers)
 
     @routes.post("/evergreen-private/images")
@@ -336,8 +374,12 @@ def start_routes(jobs):
     async def create_selection(request):
         return await create_job(request, selection=True)
 
-    async def create_job(request, selection):
-        max_body = 29 * 1024 * 1024 if selection else MAX_BODY
+    @routes.post("/evergreen-private/upscales")
+    async def create_upscale(request):
+        return await create_job(request, selection=False, upscaling=True)
+
+    async def create_job(request, selection, upscaling=False):
+        max_body = 29 * 1024 * 1024 if selection or upscaling else MAX_BODY
         if request.content_length and request.content_length > max_body:
             return web.json_response({"error": "Image payload too large"}, status=413, headers=headers)
         payload = bytearray()
@@ -347,12 +389,12 @@ def start_routes(jobs):
                 if len(payload) > max_body:
                     return web.json_response({"error": "Image payload too large"}, status=413, headers=headers)
             body = json.loads(payload)
-            allowed = {"id", "source", "query", "width", "height"} if selection else {
+            allowed = {"id", "source", "width", "height", "seed"} if upscaling else {"id", "source", "query", "width", "height"} if selection else {
                 "id", "source", "reference", "reference2", "instruction", "seed", "width", "height", "operation", "profile"}
             if not isinstance(body, dict) or set(body) - allowed:
                 raise ValueError("Unexpected private job fields")
-            operation = "selection" if selection else body.get("operation")
-            if not selection and operation not in {None, "viewpoint"}:
+            operation = "upscale" if upscaling else "selection" if selection else body.get("operation")
+            if not selection and not upscaling and operation not in {None, "viewpoint"}:
                 raise ValueError("Invalid image operation")
             if not ready_assets(operation):
                 return web.json_response({"error": "Pinned private model unavailable"}, status=503, headers=headers)
@@ -363,7 +405,8 @@ def start_routes(jobs):
             source = base64.b64decode(body["source"], validate=True)
             reference = base64.b64decode(body["reference"], validate=True) if body.get("reference") else None
             reference2 = base64.b64decode(body["reference2"], validate=True) if body.get("reference2") else None
-            manifest, fresh = jobs.reserve(body["id"], source, reference, body["query"] if selection else body["instruction"],
+            instruction = upscale.WORKFLOW if upscaling else body["query"] if selection else body["instruction"]
+            manifest, fresh = jobs.reserve(body["id"], source, reference, instruction,
                 0 if selection else body["seed"], body["width"], body["height"], reference2=reference2, operation=operation,
                 profile=body.get("profile"))
             if fresh:

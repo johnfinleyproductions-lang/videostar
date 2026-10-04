@@ -107,6 +107,77 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
         await self.client.close()
         self.temp.cleanup()
 
+    async def test_private_upscale_admission_graph_and_alpha_boundary(self):
+        base = "/evergreen-private/upscales"
+        body = {key: self.payload[key] for key in ["id", "source", "seed", "width", "height"]}
+        self.assertEqual((await self.client.post(base, json=body)).status, 401)
+        self.assertEqual((await self.client.post(base, headers=self.auth, json=body)).status, 503)
+        original_ready = self.plugin.upscale.ready
+        self.plugin.upscale.ready = lambda node: True
+        try:
+            capabilities = await (await self.client.get("/evergreen-private/images", headers=self.auth)).json()
+            self.assertTrue(capabilities["upscales"]["ready"])
+            self.assertEqual(capabilities["upscales"]["workflow"], "seedvr2-private-upscale-2x-v1")
+            for extra in [{"instruction": "Change details"}, {"reference": body["source"]}, {"profile": "fast12-v1"}, {"operation": "upscale"}, {"scale": 4}]:
+                self.assertEqual((await self.client.post(base, headers=self.auth, json={**body, **extra})).status, 400)
+            for _ in range(2):
+                self.assertEqual((await self.client.post(base, headers=self.auth, json=body)).status, 200)
+            self.assertEqual(len(self.queued), 1)
+            self.assertEqual((await self.client.post(base, headers=self.auth, json={**body, "seed": 10})).status, 400)
+            graph = self.queued[0][2]
+            self.assertEqual(set(graph), {"7", "9", "10"})
+            self.assertEqual(graph["7"]["class_type"], "EvergreenPrivateUpscale")
+            self.assertEqual(graph["7"]["inputs"]["image"], ["10", 0])
+            self.assertNotIn("source", graph["7"]["inputs"])
+            authorization = graph["10"]["inputs"]["authorization"]
+            source = self.plugin.PrivateImage().load(self.id, "source", authorization, graph)[0]
+            self.assertEqual(source.shape, (1, 768, 768, 3))
+            with self.assertRaises(ValueError):
+                self.plugin.JOBS.verify_graph(self.id, authorization, {**graph, "11": {"class_type": "SaveImage", "inputs": {"images": ["7", 0]}}})
+            alpha = io.BytesIO(); Image.new("RGBA", (768, 768), (0, 0, 255, 128)).save(alpha, format="PNG")
+            self.plugin.JOBS._write_blob(self.id, "source", alpha.getvalue())
+            with self.assertRaisesRegex(ValueError, "canonical RGB"):
+                self.plugin.PrivateImage().load(self.id, "source", authorization, graph)
+            self.plugin.JOBS.erase(self.id)
+            self.assertFalse(list((self.base / "jobs" / self.id).glob("*.sealed")))
+        finally:
+            self.plugin.upscale.ready = original_ready
+
+    async def test_private_upscale_output_is_exact_double_and_acknowledged(self):
+        image = io.BytesIO(); Image.new("RGB", (17, 19), "blue").save(image, format="PNG")
+        body = {"id": self.id, "source": base64.b64encode(image.getvalue()).decode(), "seed": 10, "width": 17, "height": 19}
+        original_ready, original_run = self.plugin.upscale.ready, self.plugin.upscale.run
+        self.plugin.upscale.ready = lambda node: True
+        self.plugin.upscale.run = lambda node, image, manifest: image.repeat(2, axis=1).repeat(2, axis=2)
+        try:
+            self.assertEqual((await self.client.post("/evergreen-private/upscales", headers=self.auth, json=body)).status, 200)
+            graph = self.queued[0][2]; tag = graph["10"]["inputs"]["authorization"]
+            source = self.plugin.PrivateImage().load(self.id, "source", tag, graph)[0]
+            pixels = self.plugin.PrivateUpscale().run(source, self.id, tag, graph)[0]
+            self.assertEqual(pixels.shape, (1, 38, 34, 3))
+            self.assertEqual(self.plugin.JOBS.status(self.id)["progress"], {"phase": "finishing"})
+            class Tensor:
+                def __init__(self, data): self.data, self.shape = data, data.shape
+                def __len__(self): return len(self.data)
+                def __getitem__(self, index): return Tensor(self.data[index])
+                def cpu(self): return self
+                def numpy(self): return self.data
+            with self.assertRaisesRegex(ValueError, "dimensions"):
+                self.plugin.PrivateOutput().save(Tensor(source), self.id, tag, graph)
+            self.plugin.PrivateOutput().save(Tensor(pixels), self.id, tag, graph)
+            base = "/evergreen-private/images/" + self.id
+            state = await (await self.client.get(base, headers=self.auth)).json()
+            output = await (await self.client.get(base + "/output", headers=self.auth)).read()
+            self.assertEqual(hashlib.sha256(output).hexdigest(), state["sha256"])
+            with Image.open(io.BytesIO(output)) as result:
+                self.assertEqual(result.size, (34, 38)); self.assertEqual(result.mode, "RGB")
+            self.assertEqual(self.public_events, [])
+            self.assertEqual((await self.client.post(base + "/ack", headers=self.auth, json={"sha256": state["sha256"]})).status, 200)
+            self.assertEqual((await self.client.get(base + "/output", headers=self.auth)).status, 404)
+            self.assertFalse(list((self.base / "jobs" / self.id).glob("*.sealed")))
+        finally:
+            self.plugin.upscale.ready, self.plugin.upscale.run = original_ready, original_run
+
     async def test_auth_queue_signed_nodes_output_and_exact_ack(self):
         base = "/evergreen-private/images"
         self.assertEqual((await self.client.get(base)).status, 401)
