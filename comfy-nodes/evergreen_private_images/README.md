@@ -366,3 +366,88 @@ Disable Core image editing first. Revert the companion app/plugin revision,
 then restore the previous Comfy launch environment and restart through its
 normal operator path. Keep the encrypted storage/key until cleanup receipts are
 resolved; deleting them discards unacknowledged previews.
+
+## Private video tracking pilot
+
+`evergreen-private-video-v1` is a separate authenticated frame transport on the
+same serialized Comfy queue and private execution boundary. It uses the fixed
+`sam2.1-small-private-track-v1` workflow. SAM2 returns reviewed segmentation
+masks, not fine alpha matting. No MatAnyone2 model is downloaded or activated:
+its official S-Lab license permits noncommercial use, while Meta licenses the
+SAM2 code and checkpoints under Apache 2.0.
+
+Pinned assets (readiness fails if any digest differs):
+
+- Official checkpoint: [Meta SAM2.1 small](https://huggingface.co/facebook/sam2.1-hiera-small/tree/ee5bba1d82bb8749febdf90f45e84b687142ba03),
+  `sam2.1_hiera_small.pt`, 184,416,285 bytes,
+  SHA256 `6d1aa6f30de5c92224f8172114de081d104bbd23dd9dc5c58996f0cad5dc4d38`.
+  Installed at `ComfyUI-stage34/models/sam2/sam2.1_hiera_small.pt` after exact
+  byte count and digest verification. The private worker never downloads it.
+- Existing SAM2 package in `ComfyUI-RMBG/models/sam2`, from RMBG revision
+  `7f0668e2f5127c0fbf11e346b33ce45d6dc34bf7`. The 27 Python/YAML files have
+  tree digest `d1adec4f4bec6d4edbe8d45bd277c7ddc3573af60cf9bf48dd60d187d2758691`;
+  each sorted row is `relative/path:sha256\n`. The fixed small config is loaded
+  directly, without resetting shared Hydra globals. Weights load on CPU with
+  `weights_only=True` and strict key/shape matching. There is no compilation,
+  `from_pretrained`, public image loader, or automatic weight downloader.
+- Source/license: [official SAM2 repository](https://github.com/facebookresearch/sam2),
+  [MatAnyone2 license](https://github.com/pq-yang/MatAnyone2/blob/main/LICENSE.txt).
+
+The Core server prepares display-oriented opaque RGB PNGs and retains the
+original video/audio. Worker limits are 16–640 pixels per side, 2–90 full-clip
+frames, at most three seconds, 2 MiB per frame, 1 MiB per reviewed RGB binary
+seed and 120 MiB of encoded source frames. A correction job may contain only
+the final one-frame suffix of a longer clip. White selects the subject and
+black selects background; seed masks must contain both. Predicted empty masks
+are valid occlusions. Missing masks, malformed results, mismatched dimensions
+or changed timing fail closed.
+
+All routes below require the existing credential, including on loopback:
+
+1. `GET /evergreen-private/videos` returns availability and pinned limits.
+2. `POST /evergreen-private/videos` reserves `{id, version:1, workflow,
+   sourceSha256, width, height, timeBase:{num,den}, clipStartPts:0, clipEndPts,
+   frameCount, startFrame, frames:[{index,pts,duration,sha256,byteLength}],
+   seed:{sha256,byteLength}}`. Frames contain the contiguous absolute suffix
+   `startFrame..frameCount-1`. Normalized integer PTS and durations are exact;
+   each duration ends at the next PTS and the last ends at `clipEndPts`.
+3. `PUT /{id}/frames/{index}` and `PUT /{id}/seed` upload raw canonical PNGs.
+   Exact hashes/byte counts are checked before decoding. Partial uploads remain
+   resumable for 15 minutes. Reusing an ID for different metadata is rejected.
+4. `POST /{id}/start` with `{}` verifies all sealed inputs and signs a graph
+   containing only the private node, UUID and authorization. Concurrent starts
+   enqueue once. Processing expires after 24 hours. A restart fails an active
+   inference instead of silently rerunning it; completed output survives.
+5. `GET /{id}` reports uploading receipts, scalar frame progress, completion
+   digest, consumed, or failed. `GET /{id}/output` returns the canonical result
+   manifest: timing/source/geometry fields plus `masks` with one digest and byte
+   count per absolute frame index. `GET /{id}/masks/{index}` returns lossless
+   binary grayscale PNGs only after the complete receipt is durable.
+6. Core validates and durably stores every mask before `POST /{id}/ack` with
+   `{sha256}` for the result manifest. ACK and DELETE remove every input/output
+   payload, preserving only a bounded tombstone. DELETE also creates a terminal
+   tombstone for an unreserved identity, blocking a delayed reserve after account
+   erasure. No private video is available
+   through Comfy `/view`, shared preview folders or websocket streams.
+
+Video data uses the owner-only sibling of the image store, suffixed `-videos`,
+with separate encryption/signature domains. At most four unexpired video jobs
+and 1,000 tombstones are admitted. Completed input cleanup and acknowledged
+payload deletion repeat safely after crashes. The existing image store and its
+20 MiB per-file limit remain unchanged.
+
+Each inference constructs fresh model/state and lazily decodes at most two
+normalized frame tensors at a time. Cloned function globals bind the private
+frame loader and scalar progress loop without changing shared SAM2 functions.
+The reviewed seed is preserved exactly at the suffix start; Core preserves the
+parent's reviewed masks before a correction. State/tensor references and Comfy
+caches are released on completion or failure; this is not physical RAM/VRAM
+zeroization. Core owns exact original timing, audio retention and export.
+
+Tests: `test-private-video.py` covers immutable identity, timing/PNG admission,
+suffix correction, upload recovery, interrupted inference, every-mask receipts,
+quota/expiry, ACK and deletion fencing. `test-private-video-http.py` checks every
+route's authentication, simultaneous starts, unavailable models and downloads.
+`test-private-video-runtime.py` tests private loader binding, exact reviewed
+seed, empty occlusion, frame correspondence and state release. Real tracker
+quality remains a separate required acceptance gate before Core enables it.

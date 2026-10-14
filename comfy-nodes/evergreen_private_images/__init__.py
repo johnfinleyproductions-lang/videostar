@@ -25,10 +25,13 @@ from .store import PrivateJobs, canonical, job_id
 from .runtime import install_runtime_boundary
 from .selections import describe_masks
 from . import upscale, outpaint
+from . import video_routes, video_tracker
+from .video_store import VideoJobs
 
 KEY_FILE = os.environ.get("EVERGREEN_PRIVATE_IMAGE_KEY_FILE")
 ROOT = os.environ.get("EVERGREEN_PRIVATE_IMAGE_ROOT")
 JOBS = None
+VIDEO_JOBS = None
 MAX_BODY = 86 * 1024 * 1024
 PROTOCOL = "evergreen-private-images-v1"
 
@@ -221,9 +224,38 @@ class PrivateSelectionOutput:
         return {"ui": {"private_receipt": [identity]}}
 
 
+class PrivateVideoTrack:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"identity": ("STRING",), "authorization": ("STRING",)}, "hidden": {"prompt": "PROMPT"}}
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+    FUNCTION = "run"
+    CATEGORY = "Evergreen/private"
+
+    def run(self, identity, authorization, prompt):
+        if VIDEO_JOBS is None:
+            raise ValueError("Private video jobs are not configured")
+        VIDEO_JOBS.verify_graph(identity, authorization, prompt)
+        try:
+            video_tracker.track(VIDEO_JOBS, identity)
+        except BaseException:
+            with VIDEO_JOBS.lock:
+                if VIDEO_JOBS.status(identity)["state"] == "processing":
+                    VIDEO_JOBS.erase(identity, "failed")
+            raise
+        return {"ui": {"private_receipt": [identity]}}
+
+
 NODE_CLASS_MAPPINGS = {"EvergreenPrivateImage": PrivateImage, "EvergreenPrivateInstruction": PrivateInstruction,
     "EvergreenPrivateSampler": PrivateSampler, "EvergreenPrivateOutput": PrivateOutput,
-    "EvergreenPrivateSelectionOutput": PrivateSelectionOutput, "EvergreenPrivateUpscale": PrivateUpscale}
+    "EvergreenPrivateSelectionOutput": PrivateSelectionOutput, "EvergreenPrivateUpscale": PrivateUpscale,
+    "EvergreenPrivateVideoTrack": PrivateVideoTrack}
 
 
 def build_graph(manifest):
@@ -331,7 +363,9 @@ def ready_assets(operation=None):
 
 
 def start_routes(jobs):
+    global VIDEO_JOBS
     server = PromptServer.instance
+    VIDEO_JOBS = VideoJobs(str(jobs.root) + "-videos", jobs.key_file)
 
     def private_start(graph):
         # A generic signed replay may have a different queue ID. Bind telemetry
@@ -339,6 +373,10 @@ def start_routes(jobs):
         try:
             node = next(node for node in graph.values() if node.get("class_type", "").startswith("EvergreenPrivate"))
             inputs = node["inputs"]
+            if node["class_type"] == "EvergreenPrivateVideoTrack":
+                VIDEO_JOBS.verify_graph(inputs["identity"], inputs["authorization"], graph)
+                VIDEO_JOBS.progress(inputs["identity"], 0)
+                return
             jobs.verify_graph(inputs["identity"], inputs["authorization"], graph)
             jobs.progress(inputs["identity"], "preparing")
         except (OSError, ValueError, KeyError, StopIteration):
@@ -366,6 +404,7 @@ def start_routes(jobs):
     server.app.middlewares.append(authentication)
     routes = server.routes
     headers = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
+    video_routes.install_routes(server, VIDEO_JOBS, video_tracker.ready, execution.validate_prompt)
 
     @routes.get("/evergreen-private/images")
     async def capabilities(request):
@@ -509,6 +548,7 @@ def start_routes(jobs):
             threading.Event().wait(60)
             try:
                 jobs.expire()
+                VIDEO_JOBS.expire()
             except Exception:
                 # Fail closed in job reads; do not print inputs or credentials.
                 pass

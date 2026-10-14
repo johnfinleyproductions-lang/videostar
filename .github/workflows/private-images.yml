@@ -28,3 +28,6 @@ jobs:
       - run: python scripts/test-private-selections.py
       - run: python scripts/test-private-upscale.py
       - run: python scripts/test-private-outpaint.py
+      - run: python scripts/test-private-video.py
+      - run: python scripts/test-private-video-http.py
+      - run: python scripts/test-private-video-runtime.py
