@@ -133,6 +133,17 @@ class VideoHTTP(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await (await self.client.get(path, headers=self.auth)).json(), {"status": "failed"})
         self.assertEqual(list((jobs.root / self.id).glob("*.sealed")), [])
 
+    async def test_delete_before_reserve_blocks_delayed_request(self):
+        path = f"{self.video_path}/{self.id}"
+        for _ in range(2):
+            self.assertEqual((await self.client.delete(path, headers=self.auth)).status, 200)
+        self.assertEqual((await self.client.post(self.video_path, headers=self.auth, json=self.video_body)).status, 400)
+        self.assertEqual((await self.client.put(path + "/frames/0", headers=self.auth, data=self.source)).status, 409)
+        self.assertEqual((await self.client.post(path + "/start", headers=self.auth, json={})).status, 200)
+        self.assertEqual(await (await self.client.get(path, headers=self.auth)).json(), {"status": "failed"})
+        self.assertEqual(self.queued, [])
+        self.assertEqual(list((self.plugin.VIDEO_JOBS.root / self.id).glob("*.sealed")), [])
+
 
 if __name__ == "__main__":
     unittest.main()

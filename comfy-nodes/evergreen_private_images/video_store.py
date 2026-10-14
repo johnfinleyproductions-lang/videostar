@@ -270,6 +270,31 @@ class VideoJobs(PrivateJobs):
                     raise ValueError("Unexpected private video storage object")
                 file.unlink()
 
+    def erase(self, identity, state="consumed"):
+        with self.lock:
+            try:
+                return super().erase(identity, state)
+            except KeyError:
+                # Core may erase while an earlier reserve request is still in
+                # flight. Persist a terminal identity even before reservation,
+                # so that late request cannot recreate private upload state.
+                self.expire()
+                if len(list(self.root.iterdir())) >= MAX_JOBS:
+                    raise ValueError("Private video tombstone quota is full")
+                directory = self._directory(identity)
+                directory.mkdir(mode=0o700)
+                manifest = {"id": identity, "requestHash": None, "state": state,
+                    "operation": "video-tracking", "workflow": WORKFLOW,
+                    "createdAt": self.clock(), "expiresAt": self.clock(),
+                    "modelSha256": MODEL_SHA256,
+                    "implementationSha256": IMPLEMENTATION_SHA256}
+                try:
+                    self._save_manifest(identity, manifest)
+                except BaseException:
+                    shutil.rmtree(directory)
+                    raise
+                return manifest
+
     def reconcile_restart(self):
         super().reconcile_restart()
         # Completion may have persisted its receipt just before power loss.

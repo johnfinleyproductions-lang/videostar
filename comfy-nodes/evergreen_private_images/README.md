@@ -425,7 +425,9 @@ All routes below require the existing credential, including on loopback:
    binary grayscale PNGs only after the complete receipt is durable.
 6. Core validates and durably stores every mask before `POST /{id}/ack` with
    `{sha256}` for the result manifest. ACK and DELETE remove every input/output
-   payload, preserving only a bounded tombstone. No private video is available
+   payload, preserving only a bounded tombstone. DELETE also creates a terminal
+   tombstone for an unreserved identity, blocking a delayed reserve after account
+   erasure. No private video is available
    through Comfy `/view`, shared preview folders or websocket streams.
 
 Video data uses the owner-only sibling of the image store, suffixed `-videos`,

@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -185,6 +186,27 @@ class VideoStoreTests(unittest.TestCase):
         self.jobs.expire()
         self.assertEqual(list(self.jobs.root.rglob("*.sealed")), [])
         self.assertTrue(self.jobs.reserve_video(request(str(uuid.uuid4()), self.source, self.seed))[1])
+
+    def test_delete_before_reserve_is_durable_bounded_and_blocks_late_upload(self):
+        self.jobs.erase(self.identity, "expired")
+        self.jobs.erase(self.identity, "expired")
+        self.assertEqual(list((self.jobs.root / self.identity).iterdir()),
+            [self.jobs.root / self.identity / "manifest.json"])
+        restarted = video.VideoJobs(self.jobs.root, self.key, clock=lambda: self.now[0])
+        self.now[0] += video.TTL_SECONDS + 1
+        self.assertEqual(restarted.status(self.identity)["state"], "expired")
+        with self.assertRaises(ValueError):
+            restarted.reserve_video(self.body)
+        with self.assertRaises(ValueError):
+            restarted.upload(self.identity, self.source, 0)
+        with patch.object(video, "MAX_JOBS", 1):
+            restarted.erase(self.identity, "expired")
+            with self.assertRaises(ValueError):
+                restarted.erase(str(uuid.uuid4()), "expired")
+        self.assertEqual(len(list(self.jobs.root.iterdir())), 1)
+        self.now[0] += 30 * video.TTL_SECONDS
+        restarted.expire()
+        self.assertEqual(list(self.jobs.root.iterdir()), [])
 
 
 if __name__ == "__main__":
