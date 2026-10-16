@@ -44,7 +44,7 @@ import {
   buildWanAnimate,
   buildWanReplace,
   buildWanI2V,
-  wanAnimateLength,
+  wanFramesFromSource,
   VACE_IMAGE_MASK_RE,
   CAMERA_LIB_MOVES,
   durationToLegalFrames,
@@ -1041,6 +1041,10 @@ export async function POST(request: NextRequest) {
     // silent cross-lane bugs happen).
     let foleySeconds: number | undefined;
     let foleyProbe: VideoProbeResult | undefined;
+    // WAN-ANIMATE / WAN-REPLACE: the driving clip's real length, read off its
+    // header so an omitted `frames` renders the clip's own frame count
+    // instead of the fixed 81 (which padded a 65-frame source by 16).
+    let wanProbe: VideoProbeResult | undefined;
 
     if (wantsVaceRef && !imageName) {
       return NextResponse.json(
@@ -1106,6 +1110,31 @@ export async function POST(request: NextRequest) {
           },
           { status: 400 },
         );
+      }
+      // WAN lanes: header-probe the driving clip (same best-effort mechanics
+      // as MATTE/FOLEY — bytes we already hold, else a Range-fetched head via
+      // ComfyUI /view). Only consulted when `frames` is absent; a probe
+      // failure falls back to the 81-frame default with a log line.
+      if ((wantsWanAnimate || wantsWanReplace) && typeof body.frames !== "number") {
+        const headBytes =
+          videoSource?.bytes ??
+          (await getFileHeadBytes(comfyBase, videoName, VIDEO_PROBE_HEAD_BYTES));
+        if (headBytes) {
+          try {
+            wanProbe = probeVideoHeader(headBytes);
+            console.log(
+              `[FrameForge] ${wantsWanReplace ? "WAN-REPLACE" : "WAN-ANIMATE"} driver probed: ` +
+                `${wanProbe.frameCount ?? "?"} frames, ${wanProbe.durationSeconds.toFixed(2)}s` +
+                ` @ ${wanProbe.fps ?? "?"}fps (${wanProbe.container})`,
+            );
+          } catch (error) {
+            console.log(
+              `[FrameForge] ${wantsWanReplace ? "WAN-REPLACE" : "WAN-ANIMATE"} driver probe unavailable (` +
+                (error instanceof Error ? error.message : String(error)) +
+                ") — falling back to the default length",
+            );
+          }
+        }
       }
       maskName = (
         await resolveVideoRef(
@@ -1621,8 +1650,20 @@ export async function POST(request: NextRequest) {
       const template = loadTemplate(
         modelProfile.templateFile ?? "wan_animate2.json",
       );
-      const frames = wanAnimateLength(
+      const framesDecision = wanFramesFromSource(
         typeof body.frames === "number" ? body.frames : undefined,
+        wanProbe,
+        "The WAN-ANIMATE lane",
+      );
+      if (!framesDecision.ok) {
+        return NextResponse.json({ error: framesDecision.error }, { status: 400 });
+      }
+      const frames = framesDecision.frames;
+      console.log(
+        `[FrameForge] WAN-ANIMATE length ${frames} (${framesDecision.basis}` +
+          (framesDecision.sourceFrames !== undefined ? `, driver ${framesDecision.sourceFrames} frames` : "") +
+          (framesDecision.basis === "default" ? " — driver length unknown, recipe default used" : "") +
+          ")",
       );
       const workflow = buildWanAnimate({
         template,
@@ -1699,8 +1740,20 @@ export async function POST(request: NextRequest) {
       const template = loadTemplate(
         modelProfile.templateFile ?? "wan_replace.json",
       );
-      const frames = wanAnimateLength(
+      const framesDecision = wanFramesFromSource(
         typeof body.frames === "number" ? body.frames : undefined,
+        wanProbe,
+        "The WAN-REPLACE lane",
+      );
+      if (!framesDecision.ok) {
+        return NextResponse.json({ error: framesDecision.error }, { status: 400 });
+      }
+      const frames = framesDecision.frames;
+      console.log(
+        `[FrameForge] WAN-REPLACE length ${frames} (${framesDecision.basis}` +
+          (framesDecision.sourceFrames !== undefined ? `, driver ${framesDecision.sourceFrames} frames` : "") +
+          (framesDecision.basis === "default" ? " — driver length unknown, recipe default used" : "") +
+          ")",
       );
       const workflow = buildWanReplace({
         template,
