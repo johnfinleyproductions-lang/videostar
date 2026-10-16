@@ -821,6 +821,14 @@ export const WAN_REPLACE_TEMPLATE_TITLES = {
   reference: "FF Character Ref",
   /** LoadVideo — subject mask, frame-for-frame with the driving video (from MATTE). */
   mask: "FF Mask Video",
+  /** GetVideoComponents over the mask video (dropped on the alpha branch). */
+  maskComponents: "FF Mask Components",
+  /**
+   * ImageToMask(red) — the MASK every consumer (FF Replace.character_mask,
+   * FF Background Blackout) links to. On the alpha branch this node id is
+   * KEPT and re-typed to InvertMask so those links need no rewiring.
+   */
+  maskConvert: "FF Mask Convert",
   positive: "FF Positive",
   negative: "FF Negative",
   /** WanAnimateToVideo (V1) — size, length; background_video/character_mask are
@@ -838,6 +846,12 @@ export type WanReplaceBuildParams = {
   referenceName: string;
   /** ComfyUI input-dir ref for the subject mask video (white = subject). */
   maskName: string;
+  /**
+   * The mask is an ALPHA webm (the MATTE lane's own deliverable, detected by
+   * the route via probeVideoHeader → alpha) rather than a white-on-black
+   * mask video. See buildWanReplace for the branch swap.
+   */
+  maskHasAlpha?: boolean;
   positive: string;
   negative?: string;
   width?: number;
@@ -895,7 +909,64 @@ export function buildWanReplace(params: WanReplaceBuildParams): ComfyWorkflow {
     patches[T.output] = { filename_prefix: params.filenamePrefix };
   }
   applyTitlePatches(workflow, patches);
+  if (params.maskHasAlpha) swapWanReplaceMaskToAlpha(workflow, maskName);
   return workflow;
+}
+
+/**
+ * Alpha-mask branch for WAN-REPLACE: read the subject mask from the file's
+ * ALPHA plane instead of its red channel.
+ *
+ * Why: the MATTE lane delivers a VP9 webm whose picture is the ORIGINAL
+ * footage and whose matte lives in the alpha plane (BlockAdditional side
+ * data, AlphaMode=1). Core LoadVideo (PyAV) decodes RGB only, so the
+ * template's LoadVideo → GetVideoComponents → ImageToMask(red) chain would
+ * turn that file into "the red channel of the source picture" — not a mask.
+ *
+ * VHS_LoadVideoFFmpeg re-opens any "Video: vp9" stream with the libvpx-vp9
+ * decoder (the one that honours VP9 alpha), decodes RGBA, and returns
+ * output 1 = 1 - alpha (ComfyUI's MASK convention, white = transparent). One
+ * InvertMask turns that back into white = subject, the polarity
+ * character_mask expects. The ImageToMask node's id is reused for that
+ * InvertMask, so FF Replace.character_mask and FF Background Blackout keep
+ * their existing links. force_rate/frame_load_cap 0 = every frame at the
+ * file's own rate — the same frames core LoadVideo would have produced.
+ */
+function swapWanReplaceMaskToAlpha(workflow: ComfyWorkflow, maskName: string): void {
+  const T = WAN_REPLACE_TEMPLATE_TITLES;
+  const load = patchByTitle(workflow, T.mask);
+  const components = patchByTitle(workflow, T.maskComponents);
+  const convert = patchByTitle(workflow, T.maskConvert);
+
+  workflow[load.id] = {
+    class_type: "VHS_LoadVideoFFmpeg",
+    inputs: {
+      video: maskName,
+      force_rate: 0,
+      custom_width: 0,
+      custom_height: 0,
+      frame_load_cap: 0,
+      start_time: 0,
+    },
+    _meta: { title: T.mask },
+  };
+  delete workflow[components.id];
+  workflow[convert.id] = {
+    class_type: "InvertMask",
+    inputs: { mask: [load.id, 1] },
+    _meta: { title: T.maskConvert },
+  };
+
+  // Nothing else may still point at the dropped GetVideoComponents node.
+  for (const [id, node] of Object.entries(workflow)) {
+    for (const value of Object.values(node.inputs ?? {})) {
+      if (Array.isArray(value) && value[0] === components.id) {
+        throw new Error(
+          `swapWanReplaceMaskToAlpha: node ${id} still links to the removed "${T.maskComponents}"`,
+        );
+      }
+    }
+  }
 }
 
 export const MATTE_TEMPLATE_TITLES = {

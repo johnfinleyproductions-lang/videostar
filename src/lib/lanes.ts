@@ -469,7 +469,7 @@ export const LANES: readonly LaneDescriptor[] = [
         type: "string",
         required: true,
         description:
-          "REQUIRED: the subject mask, frame-for-frame with videoUrl (white = subject/replace, matching MATTE's alpha convention) — an http-fetchable mask VIDEO (a still is NOT auto-repeated here, unlike VACE's vace-inpaint; pass a proper mask video, e.g. the MATTE lane's own output run on the same source clip). maskPath / mask accepted alternatives.",
+          "REQUIRED: the subject mask, frame-for-frame with videoUrl — an http-fetchable mask VIDEO (a still is NOT auto-repeated here, unlike VACE's vace-inpaint). TWO forms accepted, detected from the file header: (a) the MATTE lane's own deliverable, used AS-IS — pass the MATTE job's `url` for the SAME source clip; its VP9 alpha plane (AlphaMode=1) is read as the mask via VHS_LoadVideoFFmpeg + InvertMask, no ffmpeg or extra graph on your side; or (b) a plain white-subject-on-black mask video (red channel read). maskPath / mask accepted alternatives.",
       },
     ],
   },
@@ -477,7 +477,7 @@ export const LANES: readonly LaneDescriptor[] = [
     laneKey: "MATTE",
     title: "MatAnyone Matte (Footage → Alpha)",
     description:
-      "Real-footage keying, no green screen: an existing video of a person/subject → a transparent-background VP9 webm with REAL alpha, source fps and audio preserved end-to-end. The first-frame seed mask is OPTIONAL: omit it and the graph auto-masks the subject (first frame → BiRefNet person/subject segmentation → MatAnyone2 seed); supply one (white = subject, black = background; a rough brush-over works — MatAnyone2 regenerates a clean matte during warmup, then propagates it) to pick a specific subject. A TRANSFORM lane: no prompt needed, never RIFE'd. Feeds the VACE reference lane (background-removed identity refs) and any composite.",
+      "Real-footage keying, no green screen: an existing video of a person/subject → a transparent-background VP9 webm with REAL alpha, source fps and audio preserved end-to-end. The first-frame seed mask is OPTIONAL: omit it and the graph auto-masks the subject (first frame → BiRefNet person/subject segmentation → MatAnyone2 seed); supply one (white = subject, black = background; a rough brush-over works — MatAnyone2 regenerates a clean matte during warmup, then propagates it) to pick a specific subject. A TRANSFORM lane: no prompt needed, never RIFE'd. Feeds the VACE reference lane (background-removed identity refs), WAN-REPLACE (pass this job's url as its maskUrl — the alpha plane is read as the subject mask), and any composite. CHECKING THE ALPHA: VP9 stores alpha as side data that ffmpeg's NATIVE vp9 decoder ignores — plain `ffprobe` shows yuv420p and `-vf alphaextract` fails \"Requested planes not available\" on a GOOD file. Decode with `-c:v libvpx-vp9` BEFORE `-i` (then pix_fmt reads yuva420p); the stream also carries tag alpha_mode=1.",
     kind: "matte",
     executor: "generate",
     endpoint: "/api/generate",
