@@ -13,6 +13,7 @@ import {
   isLensModel,
   queueLensPrompt,
 } from "@/lib/lens-client";
+import { getMingPreflight, isMingModel, queueMingPrompt } from "@/lib/ming-client";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -32,6 +33,17 @@ export async function GET(request: NextRequest) {
     });
   }
 
+  if (isMingModel(model)) {
+    const preflight = await getMingPreflight();
+    return NextResponse.json({
+      ok: preflight.ok,
+      status: preflight.ok ? "ready" : "unavailable",
+      missing: preflight.missing,
+      comfyuiUrl: preflight.comfyuiUrl,
+      provider: "comfyui",
+      ...(preflight.hint ? { hint: preflight.hint } : {}),
+    });
+  }
   const preflight = await getFluxPreflight(resolveFluxComfyBase(), model);
   return NextResponse.json({
     ok: preflight.ok,
@@ -119,6 +131,46 @@ export async function POST(request: NextRequest) {
     // Stills worker: FLUX_COMFYUI_URL override, else the first enabled
     // "flux-image" fleet worker (deterministic — the stateless images API
     // must poll the same box it dispatched to; see flux-client.ts).
+    // Ming-Image design lane: a different box (Framerstation ComfyUI 0.38
+    // gpu-flex lane) and a "ming-" job id, so it never touches the Flux path.
+    if (isMingModel(requestedModel)) {
+      if (referenceImage !== undefined || referenceImage2 !== undefined) {
+        return NextResponse.json(
+          { error: "Ming-Image design is text-to-image only here (its edit mode is not wired yet)" },
+          { status: 400 },
+        );
+      }
+      const mingPreflight = await getMingPreflight();
+      if (!mingPreflight.ok) {
+        return NextResponse.json(
+          {
+            error: "Ming-Image is not ready on the Framerstation comfyui-ming lane",
+            missing: mingPreflight.missing,
+            comfyuiUrl: mingPreflight.comfyuiUrl,
+            ...(mingPreflight.hint ? { hint: mingPreflight.hint } : {}),
+          },
+          { status: 503 },
+        );
+      }
+      const queued = await queueMingPrompt({
+        prompt,
+        width,
+        height,
+        seed,
+        steps,
+        transparent: body.transparent === true || body.background === "transparent",
+      });
+      return NextResponse.json({
+        prompt_id: queued.jobId,
+        client_id: queued.jobId,
+        status: "processing",
+        provider: "comfyui",
+        seed: queued.seed,
+        width: queued.width,
+        height: queued.height,
+      });
+    }
+
     const fluxBase = resolveFluxComfyBase();
     const preflight = await getFluxPreflight(fluxBase, model);
     if (!preflight.ok) {

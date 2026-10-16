@@ -261,6 +261,23 @@ function embeddedFleet(): FleetWorker[] {
       lanes: ["flux-image", "audio"],
     },
     {
+      // Ming-Image-0.1-Design (inclusionAI 6B design text-to-image: UI,
+      // slides, posters, infographics, native RGBA). Needs ComfyUI >= 0.38
+      // (Comfy-Org/ComfyUI #16482), which only Framerstation's on-demand
+      // gpu-flex lane "comfyui-ming" runs (~/ComfyUI-ming, :8198 — Core's
+      // config/gpu-lanes.json). Disabled until MING_COMFYUI_URL is set.
+      // EXCLUSIVE: no other box can run it, so a lane that is not up answers
+      // an honest 503 + hint instead of falling back to the 0.34 box.
+      name: "framerstation-ming",
+      comfyBase: cleanBase(process.env.MING_COMFYUI_URL),
+      wsBase: cleanBase(process.env.MING_COMFYUI_WS_URL),
+      lanes: ["ming-image"],
+      exclusive: true,
+      restartHint:
+        "Ming runs on Framerstation's on-demand GPU lane `comfyui-ming` — Core's Image Studio acquires it before each job; " +
+        "manually: ssh lynf@192.168.4.180 'gpu-flex acquire comfyui-ming' (then retry once :8198/system_stats answers).",
+    },
+    {
       // Light utility box (not active yet — enabled via THINK_COMFYUI_URL).
       // NOTE: distinct from the think REMOTION render service (:3070) — this
       // entry is a ComfyUI runtime on that host, used only when configured.
