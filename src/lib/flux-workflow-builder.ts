@@ -137,6 +137,10 @@ function clampDimension(value: number | undefined, fallback: number): number {
 export function buildFluxWorkflow(
   params: FluxWorkflowParams,
 ): Record<string, unknown> {
+  if (isCreativeImageModel(params.model)) {
+    return buildCreativeImageWorkflow(params, params.model);
+  }
+
   if (isQwenEditProfile(params.model)) {
     return buildQwenImageEditWorkflow(params);
   }
@@ -514,4 +518,62 @@ function buildQwenImageEditWorkflow(
   };
 
   return workflow;
+}
+
+// Recipes pinned to BFL's FLUX 3 Klein reference workflow (feef60b) and
+// OpenMOSS MOSS-Image's ComfyUI example (c1355e6). Both use 128-channel latents.
+export type CreativeImageModel = "flux3-klein" | "moss-image-sft";
+export function isCreativeImageModel(model?: string): model is CreativeImageModel {
+  return model === "flux3-klein" || model === "moss-image-sft";
+}
+export const CREATIVE_IMAGE_FILES = {
+  flux: "flux3-image-klein-bf16.safetensors",
+  encoder: "qwen3vl_4b_bf16.safetensors",
+  upsampler: "qwen3.5_9b_flux3_prompt_upsampler_int8_convrot.safetensors",
+  vae: "flux3/flux2-vae.safetensors",
+  moss: "/srv/comfyui/models/diffusers/MOSS-Image-SFT",
+} as const;
+const FLUX3_UPSAMPLER_SYSTEM = "You are the prompt upsampler of a text-to-image model. Expand the user's short request into ONE detailed, self-contained caption: the exact text the image model receives. Output only the caption, with no greetings, explanations, refusals, questions, Markdown, headings, JSON, coordinates, ids or angle-bracket tokens, and no quotes around it. If the input is not clearly an image request, caption a visualization of its concept. The request may begin with a \"TARGET CANVAS: W:H\" line: compose for that canvas (wide spreads content sideways, tall stacks it) and never mention the ratio or the canvas.\n\nFidelity and planning: keep every explicit subject, attribute, count, spatial constraint, style cue and piece of wording; never contradict, substitute, drop or narrow the request, and keep an abstract concept abstract. Decide everything left open as ONE concrete, consistent plan; never offer alternatives or hedge. Never re-express a stated constraint through another mechanism; add camera optics (depth of field, bokeh, blur) only when asked for or implied. Without a stated style, plan an actual photograph and open with the medium convention (\"Full-color outdoor photograph, ...\", \"Full-color indoor photograph, ...\", \"Studio photograph, ...\", \"Close-up photograph, ...\"); keep \"Photorealistic\" for renders, and turn \"photorealistic\" or \"realistic\" requests for photos into the photograph convention. Give a photograph a few ordinary, non-ideal specifics drawn from the scene's own objects instead of the stock-photo ideal. Do not invent names, brands, logos or celebrities; keep user-named ones. A long request keeps its content but not its wording: drop appraisal and sales vocabulary, turn moods into observable physical facts, and add only new concrete content with positions. Time of day is lighting, not rendered text.\n\nCaption format: one continuous prose block in the generative voice, never \"this image shows\", \"we can see\" or \"is visible\". Lead with medium and style, then scene, lighting and camera, then the subjects with concrete colors, materials and state. Every person in focus gets an observable profile: ethnicity, gender, age range, skin tone (\"fair skin\", \"brown skin\"), hair and clothing. Make the layout reconstructable from words: frame-relative positions (frame-left, frame-right, upper, lower, foreground, midground, background), sentence-initial anchors (\"On the left, ...\", \"In the background, ...\"), relations (holds, faces, behind) and a consistent order; describe up to about ten instances one by one, beyond that give the exact count and arrangement. Out-of-focus or distant planes are shapes, colors and silhouettes, never identities or readable text, and the background takes about a sixth of the caption. Be definite: no hedging adverbs, no quality or emotion judgments, no closing sentence about mood; state negations as what is present. Rendered text: transcribe every wording verbatim inside double quotes in its original language and script, keep the line breaks of multi-line text, and give its typography, color and placement; author concrete, domain-correct wording when the request needs text it does not supply, and name canonical structures (calendar, keyboard, periodic table) exactly with their full layout. All prose is English; only quoted text keeps its language. Typical length is 100 to 350 words, more for complex scenes.\n\nOutput only the caption.";
+
+function buildCreativeImageWorkflow(params: FluxWorkflowParams, model: CreativeImageModel): Record<string, unknown> {
+  if (params.referenceImage !== undefined || params.referenceImage2 !== undefined) {
+    throw new Error("This image profile currently supports text prompts only.");
+  }
+  const flux = model === "flux3-klein";
+  const dimension = (n: number | undefined) => Math.max(256, Math.min(1536,
+    Math.round((typeof n === "number" && Number.isFinite(n) ? n : 1024) / 16) * 16));
+  const width = dimension(params.width), height = dimension(params.height);
+  const seed = typeof params.seed === "number" && Number.isSafeInteger(params.seed) && params.seed >= 0
+    ? params.seed : Math.floor(Math.random() * 1_000_000_000_000);
+  const steps = Math.max(1, Math.min(50, Math.round(
+    typeof params.steps === "number" && Number.isFinite(params.steps) ? params.steps : flux ? 16 : 50)));
+  const cfg = typeof params.cfg === "number" && Number.isFinite(params.cfg)
+    ? Math.max(1, Math.min(10, params.cfg)) : flux ? 1 : 3;
+  const node = (class_type: string, inputs: Record<string, unknown>) => ({ class_type, inputs });
+  const wf: Record<string, unknown> = {
+    "1": flux ? node("UNETLoader", { unet_name: CREATIVE_IMAGE_FILES.flux, weight_dtype: "default" })
+      : node("MOSSImageHFLoader", { model_path: CREATIVE_IMAGE_FILES.moss, weight_dtype: "default", text_device: "default" }),
+    "4": node("CLIPTextEncode", { clip: [flux ? "2" : "1", flux ? 0 : 1], text: flux ? ["11", 0] : params.prompt }),
+    "5": node("CLIPTextEncode", { clip: [flux ? "2" : "1", flux ? 0 : 1], text: params.negativePrompt ?? "" }),
+    "6": node("EmptyFlux2LatentImage", { width, height, batch_size: 1 }),
+    "7": node("KSampler", { model: [flux ? "12" : "13", 0], positive: ["4", 0], negative: ["5", 0],
+      latent_image: ["6", 0], seed, steps, cfg, sampler_name: "euler", scheduler: flux ? "simple" : "sgm_uniform", denoise: 1 }),
+    "8": node("VAEDecode", { samples: ["7", 0], vae: [flux ? "3" : "1", flux ? 0 : 2] }),
+    "9": node("SaveImage", { images: ["8", 0], filename_prefix: flux ? "FrameForge_FLUX3_Klein" : "FrameForge_MOSS_Image_SFT" }),
+  };
+  if (flux) {
+    wf["2"] = node("CLIPLoader", { clip_name: CREATIVE_IMAGE_FILES.encoder, type: "flux3", device: "default" });
+    wf["3"] = node("VAELoader", { vae_name: CREATIVE_IMAGE_FILES.vae });
+    wf["10"] = node("CLIPLoader", { clip_name: CREATIVE_IMAGE_FILES.upsampler, type: "flux3", device: "default" });
+    wf["11"] = node("TextGenerate", { clip: ["10", 0], prompt: `TARGET CANVAS: ${width}:${height}\n${params.prompt}`,
+      max_length: 3584, sampling_mode: "on", "sampling_mode.temperature": 1, "sampling_mode.top_k": 1,
+      "sampling_mode.top_p": 0.95, "sampling_mode.min_p": 0, "sampling_mode.repetition_penalty": 1,
+      "sampling_mode.seed": seed, "sampling_mode.presence_penalty": 1.5, thinking: false,
+      use_default_template: true, mtp: "off", system_prompt: FLUX3_UPSAMPLER_SYSTEM });
+    wf["12"] = node("ModelSamplingFlux", { model: ["1", 0], max_shift: Math.log(16), base_shift: Math.log(16), width, height });
+  } else {
+    wf["12"] = node("ModelSamplingSD3", { model: ["1", 0], shift: 5 });
+    wf["13"] = node("SkipLayerGuidanceDiTSimple", { model: ["12", 0], double_layers: "", single_layers: "22", start_percent: 0, end_percent: 1 });
+  }
+  return wf;
 }

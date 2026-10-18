@@ -6,8 +6,9 @@ import {
   getFluxPreflight,
   resolveFluxComfyBase,
   uploadFluxInputImage,
+  CREATIVE_IMAGE_JOB_PREFIX,
 } from "@/lib/flux-client";
-import { buildFluxWorkflow } from "@/lib/flux-workflow-builder";
+import { buildFluxWorkflow, isCreativeImageModel } from "@/lib/flux-workflow-builder";
 import {
   getLensPreflight,
   isLensModel,
@@ -44,7 +45,7 @@ export async function GET(request: NextRequest) {
       ...(preflight.hint ? { hint: preflight.hint } : {}),
     });
   }
-  const preflight = await getFluxPreflight(resolveFluxComfyBase(), model);
+  const preflight = await getFluxPreflight(resolveFluxComfyBase(model), model);
   return NextResponse.json({
     ok: preflight.ok,
     status: preflight.ok ? "ready" : "unavailable",
@@ -171,8 +172,11 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const fluxBase = resolveFluxComfyBase();
-    const preflight = await getFluxPreflight(fluxBase, model);
+    if (isCreativeImageModel(requestedModel) && (referenceImage !== undefined || referenceImage2 !== undefined)) {
+      return NextResponse.json({ error: "This model currently supports text prompts only." }, { status: 400 });
+    }
+    const fluxBase = resolveFluxComfyBase(requestedModel);
+    const preflight = await getFluxPreflight(fluxBase, requestedModel);
     if (!preflight.ok) {
       return NextResponse.json(
         {
@@ -211,14 +215,14 @@ export async function POST(request: NextRequest) {
       referenceImage: resolvedReferenceImage,
       referenceImage2: resolvedReferenceImage2,
       denoise,
-      model,
+      model: requestedModel,
     });
 
     const clientId = `frameforge-${Date.now()}`;
     const response = await queueFluxPrompt(fluxBase, workflow, clientId);
 
     return NextResponse.json({
-      prompt_id: response.prompt_id,
+      prompt_id: isCreativeImageModel(requestedModel) ? `${CREATIVE_IMAGE_JOB_PREFIX}${response.prompt_id}` : response.prompt_id,
       client_id: clientId,
       status: "processing",
       provider: "comfyui",

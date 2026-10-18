@@ -11,11 +11,20 @@ import { comfyFetch, isPrivateHistory } from "./comfy-auth";
 // images API is stateless (the client holds only a prompt_id), so dispatch
 // and status polling must land on the same worker every time.
 
-import { resolveWorkerForLane } from "./fleet";
+import { resolveWorkerForLane, getWorkerComfyBase } from "./fleet";
+import { isCreativeImageModel, CREATIVE_IMAGE_FILES } from "./flux-workflow-builder";
+import { readEnum } from "./model-preflight";
+import { access, readFile } from "node:fs/promises";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 /** ComfyUI base for the FLUX/Z-Image stills lane (see module note above). */
-export function resolveFluxComfyBase(): string {
+export const CREATIVE_IMAGE_JOB_PREFIX = "vidbox-image-";
+export function isCreativeImageJob(id: string): boolean {
+  return /^vidbox-image-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id);
+}
+export function resolveFluxComfyBase(model?: string): string {
+  if (isCreativeImageModel(model)) return getWorkerComfyBase("vidbox");
   if (process.env.FLUX_COMFYUI_URL) return process.env.FLUX_COMFYUI_URL;
   const [first] = resolveWorkerForLane("flux-image");
   // resolveWorkerForLane always includes the default worker, whose comfyBase
@@ -185,6 +194,37 @@ export async function getFluxPreflight(
 
   const objectInfo = (await res.json()) as Record<string, ObjectInfoNode>;
   const missing: string[] = [];
+  if (isCreativeImageModel(model)) {
+    const nodes = ["CLIPTextEncode", "EmptyFlux2LatentImage", "KSampler", "VAEDecode", "SaveImage",
+      ...(model === "flux3-klein" ? ["UNETLoader", "CLIPLoader", "VAELoader", "TextGenerate", "ModelSamplingFlux"]
+        : ["MOSSImageHFLoader", "ModelSamplingSD3", "SkipLayerGuidanceDiTSimple"])];
+    for (const name of nodes) if (!objectInfo[name]) missing.push(`${name} node is unavailable`);
+    if (model === "flux3-klein") {
+      for (const [cls, field, value] of [
+        ["UNETLoader", "unet_name", CREATIVE_IMAGE_FILES.flux],
+        ["CLIPLoader", "clip_name", CREATIVE_IMAGE_FILES.encoder],
+        ["CLIPLoader", "clip_name", CREATIVE_IMAGE_FILES.upsampler],
+        ["CLIPLoader", "type", "flux3"],
+        ["VAELoader", "vae_name", CREATIVE_IMAGE_FILES.vae],
+      ]) if (!readEnum(objectInfo[cls], field)?.has(value)) missing.push(`${value} is not available in ${cls}`);
+    } else {
+      // FrameForge runs on Windows and the model is on the same host's WSL disk.
+      // Read both shard indexes and verify every referenced shard before queuing.
+      const root = process.platform === "win32"
+        ? "\\\\wsl.localhost\\Ubuntu-24.04\\srv\\comfyui\\models\\diffusers\\MOSS-Image-SFT"
+        : CREATIVE_IMAGE_FILES.moss;
+      try {
+        await access(path.join(root, "model_index.json"));
+        for (const [dir, index] of [["transformer", "diffusion_pytorch_model.safetensors.index.json"], ["text_encoder", "model.safetensors.index.json"]]) {
+          const data = JSON.parse(await readFile(path.join(root, dir, index), "utf8")) as { weight_map: Record<string, string> };
+          await Promise.all([...new Set(Object.values(data.weight_map))].map(file => access(path.join(root, dir, file))));
+        }
+        await access(path.join(root, "vae", "diffusion_pytorch_model.safetensors"));
+        await access(path.join(root, "tokenizer", "tokenizer.json"));
+      } catch { missing.push("MOSS-Image-SFT local model directory is incomplete or unavailable"); }
+    }
+    return { ok: missing.length === 0, missing, comfyuiUrl: base };
+  }
   const zImageProfile = isZImageProfile(model) ? model : null;
   if (zImageProfile) {
     return getZImagePreflight(base, objectInfo, zImageProfile);
@@ -374,13 +414,15 @@ export function fluxOutputUrl(
   internalBase: string,
   filename: string,
   subfolder: string,
+  worker?: "vidbox",
 ): string {
   const params = new URLSearchParams({
     filename,
     subfolder,
     type: "output",
   });
-  return `/api/output?${params}&stills=true`;
+  if (worker) params.set("worker", worker);
+  return `/api/output?${params}${worker ? "" : "&stills=true"}`;
 }
 
 export function extractFluxImageFilename(
