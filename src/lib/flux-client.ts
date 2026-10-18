@@ -14,8 +14,6 @@ import { comfyFetch, isPrivateHistory } from "./comfy-auth";
 import { resolveWorkerForLane, getWorkerComfyBase } from "./fleet";
 import { isCreativeImageModel, CREATIVE_IMAGE_FILES } from "./flux-workflow-builder";
 import { readEnum } from "./model-preflight";
-import { access, readFile } from "node:fs/promises";
-import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 /** ComfyUI base for the FLUX/Z-Image stills lane (see module note above). */
@@ -208,20 +206,12 @@ export async function getFluxPreflight(
         ["VAELoader", "vae_name", CREATIVE_IMAGE_FILES.vae],
       ]) if (!readEnum(objectInfo[cls], field)?.has(value)) missing.push(`${value} is not available in ${cls}`);
     } else {
-      // FrameForge runs on Windows and the model is on the same host's WSL disk.
-      // Read both shard indexes and verify every referenced shard before queuing.
-      const root = process.platform === "win32"
-        ? "\\\\wsl.localhost\\Ubuntu-24.04\\srv\\comfyui\\models\\diffusers\\MOSS-Image-SFT"
-        : CREATIVE_IMAGE_FILES.moss;
-      try {
-        await access(path.join(root, "model_index.json"));
-        for (const [dir, index] of [["transformer", "diffusion_pytorch_model.safetensors.index.json"], ["text_encoder", "model.safetensors.index.json"]]) {
-          const data = JSON.parse(await readFile(path.join(root, dir, index), "utf8")) as { weight_map: Record<string, string> };
-          await Promise.all([...new Set(Object.values(data.weight_map))].map(file => access(path.join(root, dir, file))));
-        }
-        await access(path.join(root, "vae", "diffusion_pytorch_model.safetensors"));
-        await access(path.join(root, "tokenizer", "tokenizer.json"));
-      } catch { missing.push("MOSS-Image-SFT local model directory is incomplete or unavailable"); }
+      // Ask the worker's native HF-directory catalog. The Windows scheduled
+      // service cannot traverse WSL UNC shares, even while Comfy can load them.
+      // DiffusersLoader is used for discovery only; execution uses MOSSImageHFLoader.
+      if (!readEnum(objectInfo.DiffusersLoader, "model_path")?.has("MOSS-Image-SFT")) {
+        missing.push("MOSS-Image-SFT is not visible in the worker's model directory catalog");
+      }
     }
     return { ok: missing.length === 0, missing, comfyuiUrl: base };
   }

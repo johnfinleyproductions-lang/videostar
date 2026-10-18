@@ -16,12 +16,11 @@ function compile(file, mocks = {}, globals = {}) {
 }
 const builder = compile('src/lib/flux-workflow-builder.ts');
 const enumReader = compile('src/lib/model-preflight.ts', { './comfy-auth': {} });
-function client(fetch, readFile = async () => '{"weight_map":{"a":"shard.safetensors"}}') {
+function client(fetch) {
   return compile('src/lib/flux-client.ts', {
     './comfy-auth': { comfyFetch: fetch, isPrivateHistory: () => false },
     './fleet': { getWorkerComfyBase: () => 'http://vidbox:8188', resolveWorkerForLane: () => [{ comfyBase: 'http://frame:8188' }] },
     './flux-workflow-builder': builder, './model-preflight': enumReader,
-    'node:fs/promises': { access: async () => {}, readFile },
   });
 }
 test('FLUX 3 uses its native encoder, prompt expansion, shifted 128-channel sampling and separate VAE', () => {
@@ -72,6 +71,7 @@ test('preflight rejects old FLUX runtimes, missing upsamplers and incomplete MOS
   nodes.UNETLoader = { input: { required: { unet_name: [[builder.CREATIVE_IMAGE_FILES.flux]] } } };
   nodes.CLIPLoader = { input: { required: { clip_name: ['COMBO', { options: [builder.CREATIVE_IMAGE_FILES.encoder, builder.CREATIVE_IMAGE_FILES.upsampler] }], type: [['flux3']] } } };
   nodes.VAELoader = { input: { required: { vae_name: [[builder.CREATIVE_IMAGE_FILES.vae]] } } };
+  nodes.DiffusersLoader = { input: { required: { model_path: [["MOSS-Image-SFT"]] } } };
   const fetch = async () => ({ ok: true, json: async () => nodes });
   assert.equal((await client(fetch).getFluxPreflight('http://vidbox:8188', 'flux3-klein')).ok, true);
   nodes.CLIPLoader.input.required.type = [['flux2']];
@@ -79,5 +79,6 @@ test('preflight rejects old FLUX runtimes, missing upsamplers and incomplete MOS
   nodes.CLIPLoader.input.required.clip_name[1].options.pop();
   assert.match((await client(fetch).getFluxPreflight('http://vidbox:8188', 'flux3-klein')).missing.join(), /upsampler/);
   assert.equal((await client(fetch).getFluxPreflight('http://vidbox:8188', 'moss-image-sft')).ok, true);
-  assert.equal((await client(fetch, async () => { throw Error('missing'); }).getFluxPreflight('http://vidbox:8188', 'moss-image-sft')).ok, false);
+  nodes.DiffusersLoader.input.required.model_path = [[]];
+  assert.equal((await client(fetch).getFluxPreflight('http://vidbox:8188', 'moss-image-sft')).ok, false);
 });
