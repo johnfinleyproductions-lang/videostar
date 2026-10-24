@@ -31,6 +31,16 @@ export interface VideoProbeResult {
   height?: number;
   /** MP4 only: total video samples (Σ stts sample counts). */
   frameCount?: number;
+  /**
+   * WebM only: the video track declares a real alpha plane (Matroska
+   * AlphaMode = 1 — VP9 carries alpha as BlockAdditional side data, the way
+   * VHS_VideoCombine video/webm + yuva420p writes the MATTE lane's output).
+   * NOTE ffmpeg's native vp9 decoder IGNORES that side data and reports
+   * yuv420p (`-vf alphaextract` then fails with "Requested planes not
+   * available"); decode with `-c:v libvpx-vp9` to see yuva420p. Absent for
+   * MP4 and for WebMs without the flag.
+   */
+  alpha?: boolean;
 }
 
 /**
@@ -312,6 +322,8 @@ const EBML_ID = {
   Video: 0xe0,
   PixelWidth: 0xb0,
   PixelHeight: 0xba,
+  /** Video > AlphaMode (uint): 1 = BlockAdditional carries an alpha plane. */
+  AlphaMode: 0x53c0,
   DefaultDuration: 0x23e383,
   Cluster: 0x1f43b675,
 } as const;
@@ -425,6 +437,7 @@ function probeWebm(buffer: Buffer): VideoProbeResult {
   let width: number | undefined;
   let height: number | undefined;
   let fps: number | undefined;
+  let alpha = false;
   let sawVideoTrack = false;
 
   // Segment children: Info and Tracks precede the first Cluster in every
@@ -464,6 +477,7 @@ function probeWebm(buffer: Buffer): VideoProbeResult {
         let defaultDuration: number | undefined;
         let pixelWidth: number | undefined;
         let pixelHeight: number | undefined;
+        let alphaMode: number | undefined;
         walkEbmlChildren(buffer, entry.dataStart, entry.dataStart + entry.size, (field) => {
           if (field.id === EBML_ID.TrackType && field.size) {
             trackType = ebmlUint(buffer, field.dataStart, field.size);
@@ -475,6 +489,8 @@ function probeWebm(buffer: Buffer): VideoProbeResult {
                 pixelWidth = ebmlUint(buffer, v.dataStart, v.size);
               } else if (v.id === EBML_ID.PixelHeight && v.size) {
                 pixelHeight = ebmlUint(buffer, v.dataStart, v.size);
+              } else if (v.id === EBML_ID.AlphaMode && v.size) {
+                alphaMode = ebmlUint(buffer, v.dataStart, v.size);
               }
             });
           }
@@ -483,6 +499,7 @@ function probeWebm(buffer: Buffer): VideoProbeResult {
           sawVideoTrack = true;
           width = pixelWidth;
           height = pixelHeight;
+          alpha = alphaMode === 1;
           // DefaultDuration = ns per frame; absent for VFR → fps undefined.
           if (defaultDuration && defaultDuration > 0) {
             fps = roundFps(1e9 / defaultDuration);
@@ -504,5 +521,12 @@ function probeWebm(buffer: Buffer): VideoProbeResult {
     throw new ProbeError("WebM Duration is not a positive number");
   }
 
-  return { container: "webm", durationSeconds, fps, width, height };
+  return {
+    container: "webm",
+    durationSeconds,
+    fps,
+    width,
+    height,
+    ...(alpha ? { alpha: true } : {}),
+  };
 }
