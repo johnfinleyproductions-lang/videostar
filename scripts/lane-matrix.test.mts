@@ -33,6 +33,13 @@ for (const lane of LANES) {
       `     ${lane.laneKey} img=${hasImage} -> lane:${resolved} -> final:${finalId} (kind=${profile.kind})`,
     );
     // invariants
+    if (lane.laneKey === "MINIMAX-H3-FAST") {
+      check(
+        finalId === (hasImage ? "minimax-h3" : "minimax-h3-fast"),
+        `MINIMAX-H3-FAST img=${hasImage} resolves to ${hasImage ? "minimax-h3 (FL2VA not distilled)" : "minimax-h3-fast"}`,
+      );
+      check(profile.kind === "minimax-h3", "MINIMAX-H3-FAST stays on the minimax-h3 builder/worker");
+    }
     if (lane.laneKey === "HV-HUMANS") {
       check(
         finalId === (hasImage ? "hv15-i2v" : "hv15-t2v"),
