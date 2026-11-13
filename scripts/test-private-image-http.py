@@ -236,6 +236,106 @@ class PrivateHTTP(unittest.IsolatedAsyncioTestCase):
         finally:
             self.plugin.upscale.ready = original_ready
 
+    async def test_private_cutout_admission_graph_and_rgb_boundary(self):
+        base = "/evergreen-private/cutouts"
+        body = {key: self.payload[key] for key in ["id", "source", "width", "height"]}
+        self.assertEqual((await self.client.post(base, json=body)).status, 401)
+        # The stand-in runtime has no models folder at all: not ready, never an error.
+        capabilities = await (await self.client.get("/evergreen-private/images", headers=self.auth)).json()
+        self.assertFalse(capabilities["cutouts"]["ready"])
+        self.assertEqual((await self.client.post(base, headers=self.auth, json=body)).status, 503)
+        self.assertEqual(self.queued, [])
+        original_ready = self.plugin.cutout.ready
+        sys.modules["folder_paths"].models_dir = str(self.base / "models")
+        self.plugin.cutout.ready = lambda directory: Path(directory) == self.base / "models" / "RMBG" / "BiRefNet"
+        try:
+            capabilities = await (await self.client.get("/evergreen-private/images", headers=self.auth)).json()
+            self.assertEqual(capabilities["cutouts"], {"ready": True, "model": "birefnet-portrait", "workflow": "birefnet-portrait-private-cutout-v1",
+                "minInputSide": 64, "maxInputSide": 4096, "maxInputPixels": 2_500_000})
+            for extra in [{"instruction": "Keep the hat"}, {"seed": 4}, {"reference": body["source"]}, {"profile": "fast12-v1"}, {"operation": "cutout"}, {"query": "person"}]:
+                self.assertEqual((await self.client.post(base, headers=self.auth, json={**body, **extra})).status, 400)
+            for _ in range(2):
+                self.assertEqual((await self.client.post(base, headers=self.auth, json=body)).status, 200)
+            self.assertEqual(len(self.queued), 1)
+            graph = self.queued[0][2]
+            self.assertEqual(set(graph), {"7", "9", "10"})
+            self.assertEqual([graph[key]["class_type"] for key in ["10", "7", "9"]], ["EvergreenPrivateImage", "EvergreenPrivateCutout", "EvergreenPrivateOutput"])
+            self.assertEqual(graph["7"]["inputs"]["image"], ["10", 0])
+            self.assertEqual(graph["9"]["inputs"]["images"], ["7", 0])
+            self.assertNotIn("source", graph["7"]["inputs"])
+            self.assertNotIn("BiRefNetRMBG", json.dumps(graph), "the downloading node is never in a private graph")
+            authorization = graph["10"]["inputs"]["authorization"]
+            self.assertEqual(self.plugin.PrivateImage().load(self.id, "source", authorization, graph)[0].shape, (1, 768, 768, 3))
+            with self.assertRaises(ValueError):
+                self.plugin.JOBS.verify_graph(self.id, authorization, {**graph, "11": {"class_type": "SaveImage", "inputs": {"images": ["7", 0]}}})
+            alpha = io.BytesIO(); Image.new("RGBA", (768, 768), (0, 0, 255, 128)).save(alpha, format="PNG")
+            self.plugin.JOBS._write_blob(self.id, "source", alpha.getvalue())
+            with self.assertRaisesRegex(ValueError, "canonical RGB"):
+                self.plugin.PrivateImage().load(self.id, "source", authorization, graph)
+            self.plugin.JOBS.erase(self.id)
+            self.assertFalse(list((self.base / "jobs" / self.id).glob("*.sealed")))
+        finally:
+            self.plugin.cutout.ready = original_ready
+            del sys.modules["folder_paths"].models_dir
+
+    async def test_private_cutout_output_is_same_size_rgba_and_acknowledged(self):
+        image = io.BytesIO(); Image.new("RGB", (90, 70), "blue").save(image, format="PNG")
+        body = {"id": self.id, "source": base64.b64encode(image.getvalue()).decode(), "width": 90, "height": 70}
+        original_ready, original_predictor = self.plugin.cutout.ready, self.plugin.CUTOUT_PREDICTOR
+        sys.modules["folder_paths"].models_dir = str(self.base / "models")
+        self.plugin.cutout.ready = lambda directory: True
+        matte = np.zeros((70, 90), dtype=np.float32); matte[10:60, 20:70] = 1.0
+        seen = []
+        def predictor(rgb):
+            seen.append((rgb.shape, str(rgb.dtype)))
+            return matte
+        self.plugin.CUTOUT_PREDICTOR = predictor
+        try:
+            self.assertEqual((await self.client.post("/evergreen-private/cutouts", headers=self.auth, json=body)).status, 200)
+            graph = self.queued[0][2]; tag = graph["10"]["inputs"]["authorization"]
+            source = self.plugin.PrivateImage().load(self.id, "source", tag, graph)[0]
+            pixels = self.plugin.PrivateCutout().run(source, self.id, tag, graph)[0]
+            self.assertEqual(seen, [((70, 90, 3), "uint8")])
+            self.assertEqual(pixels.shape, (1, 70, 90, 4))
+            self.assertEqual(self.plugin.JOBS.status(self.id)["progress"], {"phase": "finishing"})
+            class Tensor:
+                def __init__(self, data): self.data, self.shape = data, data.shape
+                def __len__(self): return len(self.data)
+                def __getitem__(self, index): return Tensor(self.data[index])
+                def cpu(self): return self
+                def numpy(self): return self.data
+            with self.assertRaisesRegex(ValueError, "dimensions"):
+                self.plugin.PrivateOutput().save(Tensor(source), self.id, tag, graph)   # three channels: not a cut-out
+            self.plugin.PrivateOutput().save(Tensor(pixels), self.id, tag, graph)
+            base = "/evergreen-private/images/" + self.id
+            state = await (await self.client.get(base, headers=self.auth)).json()
+            output = await (await self.client.get(base + "/output", headers=self.auth)).read()
+            self.assertEqual(hashlib.sha256(output).hexdigest(), state["sha256"])
+            with Image.open(io.BytesIO(output)) as result:
+                self.assertEqual(result.size, (90, 70)); self.assertEqual(result.mode, "RGBA")
+                self.assertEqual(result.getpixel((45, 35)), (0, 0, 255, 255)); self.assertEqual(result.getpixel((2, 2))[3], 0)
+            self.assertEqual(self.public_events, [])
+            self.assertFalse((self.base / "public-input").exists() or (self.base / "public-output").exists())
+            self.assertEqual((await self.client.post(base + "/ack", headers=self.auth, json={"sha256": state["sha256"]})).status, 200)
+            self.assertEqual((await self.client.get(base + "/output", headers=self.auth)).status, 404)
+            self.assertFalse(list((self.base / "jobs" / self.id).glob("*.sealed")))
+        finally:
+            self.plugin.cutout.ready, self.plugin.CUTOUT_PREDICTOR = original_ready, original_predictor
+            del sys.modules["folder_paths"].models_dir
+
+    async def test_an_alpha_output_from_any_other_operation_is_refused(self):
+        body = {key: self.payload[key] for key in ["id", "source", "seed", "width", "height"]}
+        self.assertEqual((await self.client.post("/evergreen-private/images", headers=self.auth, json={**body, "instruction": "Change the background to blue"})).status, 200)
+        graph = self.queued[0][2]; tag = graph["10"]["inputs"]["authorization"]
+        class Tensor:
+            def __init__(self, data): self.data, self.shape = data, data.shape
+            def __len__(self): return len(self.data)
+            def __getitem__(self, index): return Tensor(self.data[index])
+            def cpu(self): return self
+            def numpy(self): return self.data
+        with self.assertRaisesRegex(ValueError, "dimensions"):
+            self.plugin.PrivateOutput().save(Tensor(np.zeros((1, 768, 768, 4), dtype=np.float32)), self.id, tag, graph)
+
     async def test_private_upscale_output_is_exact_double_and_acknowledged(self):
         image = io.BytesIO(); Image.new("RGB", (17, 19), "blue").save(image, format="PNG")
         body = {"id": self.id, "source": base64.b64encode(image.getvalue()).decode(), "seed": 10, "width": 17, "height": 19}

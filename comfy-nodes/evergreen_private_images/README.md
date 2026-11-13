@@ -6,6 +6,61 @@ Comfy modality remains the model runtime.
 
 ## Release state
 
+### Private cut-out (release validation pending)
+
+`POST /evergreen-private/cutouts` accepts exactly `id`, `source`, `width` and
+`height`: one canonical RGB PNG, 64 to 4096 pixels a side, at most 2.5 million
+pixels. It answers with the usual receipt. Status, output, acknowledgement and
+DELETE are the ordinary `/evergreen-private/images/{id}` routes. The output is
+an RGBA PNG of the same size: the soft matte from BiRefNet-portrait as alpha,
+and the kept pixels' colours with the old background's tint removed from soft
+edges (a blur-fusion foreground estimate). It is a matte for a person to review
+in Core, never a claim of exact hair-level truth.
+
+The fixed identity is `birefnet-portrait-private-cutout-v1`. A cut-out has no
+instruction, seed, reference, profile or operation field; any of them is a 400.
+Capabilities report it under `cutouts`: `ready`, `model`, `workflow`,
+`minInputSide`, `maxInputSide`, `maxInputPixels`.
+
+The installed `BiRefNetRMBG` node is **not** used and never appears in a
+private graph. It downloads missing files from the network and rewrites the
+model's `birefnet.py` on every load. `cutout.py` reads the same local folder,
+`models/RMBG/BiRefNet`, and:
+
+- refuses the two Python files unless their SHA-256 is the reviewed one
+  (`birefnet.py` `bd2986ce…`, `BiRefNet_config.py` `e7b8c2a7…`; the full
+  digests are in `cutout.py`), because that code is executed;
+- refuses the weights unless `BiRefNet-portrait.safetensors` has its exact
+  size (884,878,856 bytes) and a complete, non-sparse safetensors layout;
+- runs the reviewed text from memory through the import machinery, with the
+  backbone built empty (`bb_pretrained=False`) and filled from the pinned
+  weights only; writes nothing; and puts `sys.modules` back as it found it;
+- loads the model for one picture and releases it afterwards.
+
+Not ready means 503 before anything is queued; nothing is fetched or repaired.
+
+**Installing it.** The running Comfy's `models` folder must contain
+`RMBG/BiRefNet` with the three files above. On vidbox they are in the earlier
+install (`~/ComfyUI-stage34/models/RMBG/BiRefNet`), so installation is one
+symlink from the serving install's `models/RMBG`, the plugin files, and a
+restart through the normal operator path while the queue is idle. Removing the
+symlink turns the feature off again (`cutouts.ready` becomes false).
+
+Checked so far, without the serving process: `scripts/test-private-cutout.py`
+(pins, no write, no leftover modules, no network, exact output bounds, refusal
+of wrong requests and wrong model answers), the cut-out cases added to the
+storage and HTTP suites, and one standalone run of `cutout.py` on vidbox with
+the serving runtime's Python and the real files on a made-up picture: the
+weights fit the model exactly (0 missing, 0 unexpected), the matte equals the
+installed node's own steps on the same picture, 2.1 seconds a picture on the
+RTX PRO 4500 after a 9.2 second first load, and no graphics memory held
+afterwards. A perfectly flat drawing yields an empty matte; the same drawing
+with film grain yields the figure exactly.
+
+Still required before production use: the installed acceptance below with this
+job type (authenticated HTTP, no public files or events, private output,
+acknowledgement removes ciphertext), and a person's review of real edges.
+
 ### Structural masked outpaint (release validation pending)
 
 `POST /evergreen-private/images` accepts `operation: "outpaint"` with exactly
