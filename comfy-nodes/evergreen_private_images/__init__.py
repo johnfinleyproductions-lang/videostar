@@ -24,7 +24,7 @@ from server import PromptServer
 from .store import PrivateJobs, canonical, job_id
 from .runtime import install_runtime_boundary
 from .selections import describe_masks
-from . import upscale, outpaint
+from . import upscale, outpaint, cutout
 from . import video_routes, video_tracker
 from .video_store import VideoJobs
 
@@ -33,6 +33,8 @@ ROOT = os.environ.get("EVERGREEN_PRIVATE_IMAGE_ROOT")
 JOBS = None
 VIDEO_JOBS = None
 MAX_BODY = 86 * 1024 * 1024
+# None in service: the pinned local model is loaded for each cut-out. Tests supply a stand-in.
+CUTOUT_PREDICTOR = None
 PROTOCOL = "evergreen-private-images-v1"
 
 
@@ -65,6 +67,8 @@ class PrivateImage:
                 raise ValueError("Invalid canonical private input")
             if manifest.get("operation") == "upscale" and image.mode != "RGB":
                 raise ValueError("Private upscale requires canonical RGB; alpha stays in Core")
+            if manifest.get("operation") == "cutout" and image.mode != "RGB":
+                raise ValueError("Private cut-out requires canonical RGB")
             if manifest.get("operation") == "outpaint":
                 outpaint.validate_image(image, manifest["width"], manifest["height"], mask=slot == "reference")
             if slot == "source" and (image.width != manifest["width"] or image.height != manifest["height"]):
@@ -163,7 +167,9 @@ class PrivateOutput:
             raise ValueError("Selections require private geometry output")
         scale = 2 if manifest.get("operation") == "upscale" else 1
         if (len(images) != 1 or images.shape[2] != manifest["width"] * scale
-                or images.shape[1] != manifest["height"] * scale or (scale == 2 and images.shape[3] != 3)):
+                or images.shape[1] != manifest["height"] * scale or (scale == 2 and images.shape[3] != 3)
+                # A cut-out is the only output with an alpha channel, and it always has one.
+                or (images.shape[3] == 4) != (manifest.get("operation") == "cutout")):
             raise ValueError("Private output dimensions changed")
         pixels = np.clip(images[0].cpu().numpy() * 255.0, 0, 255).astype(np.uint8)
         output = io.BytesIO()
@@ -190,6 +196,27 @@ class PrivateUpscale:
         manifest = verify(identity, authorization, prompt)
         JOBS.progress(identity, "preparing")
         pixels = upscale.run(nodes.NODE_CLASS_MAPPINGS.get("SeedVR2VideoUpscaler"), image, manifest)
+        JOBS.progress(identity, "finishing")
+        return (pixels,)
+
+
+class PrivateCutout:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"image": ("IMAGE",), "identity": ("STRING",), "authorization": ("STRING",)}, "hidden": {"prompt": "PROMPT"}}
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+    CATEGORY = "Evergreen/private"
+
+    def run(self, image, identity, authorization, prompt):
+        manifest = verify(identity, authorization, prompt)
+        JOBS.progress(identity, "preparing")
+        pixels = cutout.run(image, manifest, cutout.model_directory(folder_paths.models_dir), CUTOUT_PREDICTOR)
         JOBS.progress(identity, "finishing")
         return (pixels,)
 
@@ -255,7 +282,7 @@ class PrivateVideoTrack:
 NODE_CLASS_MAPPINGS = {"EvergreenPrivateImage": PrivateImage, "EvergreenPrivateInstruction": PrivateInstruction,
     "EvergreenPrivateSampler": PrivateSampler, "EvergreenPrivateOutput": PrivateOutput,
     "EvergreenPrivateSelectionOutput": PrivateSelectionOutput, "EvergreenPrivateUpscale": PrivateUpscale,
-    "EvergreenPrivateVideoTrack": PrivateVideoTrack}
+    "EvergreenPrivateVideoTrack": PrivateVideoTrack, "EvergreenPrivateCutout": PrivateCutout}
 
 
 def build_graph(manifest):
@@ -263,6 +290,14 @@ def build_graph(manifest):
     private = {"identity": identity, "authorization": ""}
     if manifest.get("operation") == "outpaint" and manifest.get("workflow") != outpaint.WORKFLOW:
         raise ValueError("Unsupported private outpaint workflow")
+    if manifest.get("operation") == "cutout":
+        if manifest.get("workflow") != cutout.WORKFLOW:
+            raise ValueError("Unsupported private cut-out workflow")
+        return {
+            "7": {"class_type": "EvergreenPrivateCutout", "inputs": {**private, "image": ["10", 0]}},
+            "9": {"class_type": "EvergreenPrivateOutput", "inputs": {**private, "images": ["7", 0]}},
+            "10": {"class_type": "EvergreenPrivateImage", "inputs": {**private, "slot": "source"}},
+        }
     if manifest.get("operation") == "upscale":
         return {
             "7": {"class_type": "EvergreenPrivateUpscale", "inputs": {**private, "image": ["10", 0]}},
@@ -331,6 +366,11 @@ def supports_reference(slot="image2"):
 def ready_assets(operation=None):
     if operation == "upscale":
         return upscale.ready(nodes.NODE_CLASS_MAPPINGS.get("SeedVR2VideoUpscaler"))
+    if operation == "cutout":
+        try:
+            return cutout.ready(cutout.model_directory(folder_paths.models_dir))
+        except (AttributeError, TypeError):
+            return False
     if operation == "outpaint":
         return ready_assets() and outpaint.ready(nodes.NODE_CLASS_MAPPINGS)
     if operation == "selection":
@@ -418,6 +458,8 @@ def start_routes(jobs):
                 "maxInputPixels": upscale.MAX_INPUT_PIXELS, "maxOutputPixels": upscale.MAX_OUTPUT_PIXELS},
             "outpaint": {"ready": ready_assets("outpaint"), "workflow": outpaint.WORKFLOW,
                 "steps": outpaint.STEPS, "binaryMask": True, "maskPolarity": outpaint.MASK_POLARITY},
+            "cutouts": {"ready": ready_assets("cutout"), "model": cutout.MODEL, "workflow": cutout.WORKFLOW,
+                "minInputSide": cutout.MIN_SIDE, "maxInputSide": cutout.MAX_SIDE, "maxInputPixels": cutout.MAX_INPUT_PIXELS},
             "layers": {"ready": False}, "scalarProgress": True, "speedProfiles": ["fast12-v1"]}, headers=headers)
 
     @routes.post("/evergreen-private/images")
@@ -432,8 +474,12 @@ def start_routes(jobs):
     async def create_upscale(request):
         return await create_job(request, selection=False, upscaling=True)
 
-    async def create_job(request, selection, upscaling=False):
-        max_body = 29 * 1024 * 1024 if selection or upscaling else MAX_BODY
+    @routes.post("/evergreen-private/cutouts")
+    async def create_cutout(request):
+        return await create_job(request, selection=False, cutting=True)
+
+    async def create_job(request, selection, upscaling=False, cutting=False):
+        max_body = 29 * 1024 * 1024 if selection or upscaling or cutting else MAX_BODY
         if request.content_length and request.content_length > max_body:
             return web.json_response({"error": "Image payload too large"}, status=413, headers=headers)
         payload = bytearray()
@@ -443,12 +489,12 @@ def start_routes(jobs):
                 if len(payload) > max_body:
                     return web.json_response({"error": "Image payload too large"}, status=413, headers=headers)
             body = json.loads(payload)
-            allowed = {"id", "source", "width", "height", "seed"} if upscaling else {"id", "source", "query", "width", "height"} if selection else {
+            allowed = {"id", "source", "width", "height"} if cutting else {"id", "source", "width", "height", "seed"} if upscaling else {"id", "source", "query", "width", "height"} if selection else {
                 "id", "source", "reference", "reference2", "instruction", "seed", "width", "height", "operation", "profile"}
             if not isinstance(body, dict) or set(body) - allowed:
                 raise ValueError("Unexpected private job fields")
-            operation = "upscale" if upscaling else "selection" if selection else body.get("operation")
-            if not selection and not upscaling and operation not in {None, "viewpoint", "outpaint"}:
+            operation = "cutout" if cutting else "upscale" if upscaling else "selection" if selection else body.get("operation")
+            if not selection and not upscaling and not cutting and operation not in {None, "viewpoint", "outpaint"}:
                 raise ValueError("Invalid image operation")
             if operation == "outpaint" and ("reference2" in body or "profile" in body):
                 raise ValueError("Outpaint accepts exactly one mask at Standard quality")
@@ -461,9 +507,9 @@ def start_routes(jobs):
             source = base64.b64decode(body["source"], validate=True)
             reference = base64.b64decode(body["reference"], validate=True) if body.get("reference") else None
             reference2 = base64.b64decode(body["reference2"], validate=True) if body.get("reference2") else None
-            instruction = upscale.WORKFLOW if upscaling else body["query"] if selection else body["instruction"]
+            instruction = cutout.WORKFLOW if cutting else upscale.WORKFLOW if upscaling else body["query"] if selection else body["instruction"]
             manifest, fresh = jobs.reserve(body["id"], source, reference, instruction,
-                0 if selection else body["seed"], body["width"], body["height"], reference2=reference2, operation=operation,
+                0 if selection or cutting else body["seed"], body["width"], body["height"], reference2=reference2, operation=operation,
                 profile=body.get("profile"))
             if fresh:
                 graph = build_graph(manifest)

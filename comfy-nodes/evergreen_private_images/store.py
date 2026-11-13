@@ -18,6 +18,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from .upscale import WORKFLOW as UPSCALE_WORKFLOW, validate_dimensions as validate_upscale_dimensions
 from .outpaint import WORKFLOW as OUTPAINT_WORKFLOW, validate_inputs as validate_outpaint_inputs
+from .cutout import WORKFLOW as CUTOUT_WORKFLOW, validate_dimensions as validate_cutout_dimensions
 
 MAX_BYTES = 20 * 1024 * 1024
 TTL_SECONDS = 24 * 60 * 60
@@ -126,7 +127,7 @@ class PrivateJobs:
 
     def reserve(self, identity, source, reference, instruction, seed, width, height, reference2=None, operation=None, profile=None):
         job_id(identity)
-        if operation not in {None, "selection", "viewpoint", "upscale", "outpaint"}:
+        if operation not in {None, "selection", "viewpoint", "upscale", "outpaint", "cutout"}:
             raise ValueError("Invalid private operation")
         if profile not in {None, "fast12-v1"} or (profile is not None and operation is not None):
             raise ValueError("Invalid private speed profile")
@@ -142,6 +143,10 @@ class PrivateJobs:
             validate_upscale_dimensions(width, height)
             if instruction != UPSCALE_WORKFLOW:
                 raise ValueError("Upscale instructions are server owned")
+        elif operation == "cutout":
+            validate_cutout_dimensions(width, height)
+            if instruction != CUTOUT_WORKFLOW or seed != 0:
+                raise ValueError("Cut-out instructions are server owned")
         elif (any(type(value) is not int for value in (width, height)) or not 768 <= width <= 1536
                 or not 768 <= height <= 1536 or width % 32 or height % 32):
             raise ValueError("Invalid pinned image settings")
@@ -166,6 +171,8 @@ class PrivateJobs:
             request["workflow"] = UPSCALE_WORKFLOW
         elif operation == "outpaint":
             request["workflow"] = OUTPAINT_WORKFLOW
+        elif operation == "cutout":
+            request["workflow"] = CUTOUT_WORKFLOW
         if profile is not None:
             request["profile"] = profile
         request_hash = hashlib.sha256(canonical(request)).hexdigest()
@@ -198,6 +205,8 @@ class PrivateJobs:
                     manifest["workflow"] = UPSCALE_WORKFLOW
                 elif operation == "outpaint":
                     manifest["workflow"] = OUTPAINT_WORKFLOW
+                elif operation == "cutout":
+                    manifest["workflow"] = CUTOUT_WORKFLOW
                 if profile is not None:
                     manifest["profile"] = profile
                 self._save_manifest(identity, manifest)
@@ -235,7 +244,7 @@ class PrivateJobs:
             manifest = self._manifest(identity)
             if manifest["state"] != "processing" or manifest["expiresAt"] <= self.clock():
                 return
-            if phase == "sampling" and manifest.get("operation") in {"selection", "upscale"}:
+            if phase == "sampling" and manifest.get("operation") in {"selection", "upscale", "cutout"}:
                 raise ValueError("This private operation does not have Qwen sampling steps")
             if phase == "sampling" and total_steps != (12 if manifest.get("profile") == "fast12-v1" else 20):
                 raise ValueError("Sampling steps do not match the pinned profile")

@@ -160,6 +160,32 @@ class PrivateJobTests(unittest.TestCase):
         reopened.acknowledge(self.identity, hashlib.sha256(self.source).hexdigest())
         self.assertFalse(list((self.base / "jobs" / self.identity).glob("*.sealed")))
 
+    def test_cutout_identity_bounds_and_server_owned_settings(self):
+        settings = dict(reference=None, instruction=module.CUTOUT_WORKFLOW, operation="cutout", seed=0, width=1001, height=750)
+        manifest, fresh = self.reserve(**settings)
+        self.assertTrue(fresh)
+        self.assertEqual(manifest["operation"], "cutout")
+        self.assertEqual(manifest["workflow"], "birefnet-portrait-private-cutout-v1")
+        self.assertFalse(self.reserve(**settings)[1])
+        for change in [dict(width=1002), dict(seed=1), dict(instruction="Cut out something else"), dict(profile="fast12-v1"), dict(reference=self.source)]:
+            with self.assertRaises(ValueError):
+                self.reserve(**{**settings, **change})
+        for width, height in [(True, 768), (63, 800), (4097, 64), (2000, 1251), (0, 768), (768.0, 768)]:
+            with self.assertRaises(ValueError):
+                self.reserve(**{**settings, "identity": str(uuid.uuid4()), "width": width, "height": height})
+        # A brand-new cut-out cannot bring its own seed or wording either: both are the server's.
+        for change in [dict(seed=1), dict(instruction="Cut out something else"), dict(instruction=module.UPSCALE_WORKFLOW)]:
+            with self.assertRaisesRegex(ValueError, "server owned"):
+                self.reserve(**{**settings, "identity": str(uuid.uuid4()), **change})
+        self.store.authorize_graph(self.identity, self.graph)
+        with self.assertRaises(ValueError):
+            self.store.progress(self.identity, "sampling", 1, 20)
+        self.store.complete(self.identity, self.source)
+        reopened = module.PrivateJobs(self.base / "jobs", self.key, lambda: self.now[0])
+        self.assertEqual(reopened.status(self.identity)["workflow"], module.CUTOUT_WORKFLOW)
+        reopened.acknowledge(self.identity, hashlib.sha256(self.source).hexdigest())
+        self.assertFalse(list((self.base / "jobs" / self.identity).glob("*.sealed")))
+
     def test_outpaint_pins_mask_workflow_and_recovery_without_changing_legacy_identity(self):
         source = io.BytesIO(); Image.new("RGB", (768, 768), "blue").save(source, format="PNG")
         mask_image = Image.new("L", (768, 768), 255); mask_image.paste(0, (100, 100, 700, 700))
